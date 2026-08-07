@@ -97,6 +97,13 @@ export class CommandChannel implements Channel {
         else reject(new Error(`exit ${code}${stderr ? ` — ${stderr.trim().slice(0, 300)}` : ''}`))
       })
 
+      // A wrapper that never reads stdin closes the pipe under us. That is not
+      // a delivery failure — the exit code decides — so swallow EPIPE rather
+      // than letting it surface as an unhandled error and take the run down.
+      child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code !== 'EPIPE') reject(err)
+      })
+
       if (this.config.stdin === false) {
         child.stdin.end()
       } else {
