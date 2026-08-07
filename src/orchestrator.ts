@@ -19,6 +19,7 @@ import {
   salvageHandoff,
 } from './handoff.ts'
 import { buildPermissionHandler } from './policy.ts'
+import { Notifier } from './notify/notifier.ts'
 
 /**
  * A push-driven async iterable of user messages. The SDK consumes it for the
@@ -87,10 +88,12 @@ export class Orchestrator {
   private stopRequested = false
   private pauseRequested = false
   private activeQuery: Query | null = null
+  readonly notifier: Notifier
 
   constructor(cfg: InfiniteConfig, store: Store) {
     this.cfg = cfg
     this.store = store
+    this.notifier = new Notifier(cfg, store)
   }
 
   // ---------------------------------------------------------------- controls
@@ -160,6 +163,7 @@ export class Orchestrator {
       `starting — handoff at ${Math.round(this.cfg.handoffThreshold * 100)}% context, ` +
         `resuming from leg ${this.store.state.legs.length + 1}`,
     )
+    this.notifier.emit('run_started')
 
     try {
       for (;;) {
@@ -168,7 +172,7 @@ export class Orchestrator {
         const legNumber = this.store.state.legs.length + 1
         if (this.cfg.maxLegs > 0 && legNumber > this.cfg.maxLegs) {
           this.store.warn('run', `reached maxLegs (${this.cfg.maxLegs}) — stopping`)
-          this.setTerminal('stopped')
+          this.setTerminal('stopped', `Reached the ${this.cfg.maxLegs}-session limit.`)
           return
         }
         if (
@@ -180,7 +184,10 @@ export class Orchestrator {
             `total spend $${this.store.state.totalCostUsd.toFixed(2)} reached the ` +
               `$${this.cfg.maxCostUsdTotal} cap — stopping`,
           )
-          this.setTerminal('stopped')
+          this.setTerminal(
+            'stopped',
+            `Total spend reached the $${this.cfg.maxCostUsdTotal} cap.`,
+          )
           return
         }
 
@@ -195,7 +202,7 @@ export class Orchestrator {
                 : leg.outcome === 'error'
                   ? 'error'
                   : 'stopped'
-          this.setTerminal(terminal)
+          this.setTerminal(terminal, leg.reason)
           return
         }
 
@@ -211,16 +218,32 @@ export class Orchestrator {
         s.status = 'error'
         s.lastError = msg
       })
+      this.notifier.emit('run_error', { reason: msg })
     } finally {
       this.store.flush()
+      // Hold the process open just long enough for the final message to land.
+      await this.notifier.drain()
     }
   }
 
-  private setTerminal(status: 'complete' | 'blocked' | 'stopped' | 'error'): void {
+  private setTerminal(
+    status: 'complete' | 'blocked' | 'stopped' | 'error',
+    reason?: string | null,
+  ): void {
     this.store.update((s) => {
       s.status = status
     })
     this.store.info('run', `run finished with status "${status}"`)
+
+    const event =
+      status === 'complete'
+        ? 'run_complete'
+        : status === 'blocked'
+          ? 'run_blocked'
+          : status === 'error'
+            ? 'run_error'
+            : 'run_stopped'
+    this.notifier.emit(event, { reason: reason ?? null })
   }
 
   private loadMission(): string {
@@ -259,6 +282,7 @@ export class Orchestrator {
       s.handoffRequested = false
     })
     this.store.info('leg', `session ${legNumber} starting`)
+    this.notifier.emit('leg_started', { leg })
 
     const previousHandoff = legNumber > 1 ? this.store.readHandoff(legNumber - 1) : null
     if (legNumber > 1 && !previousHandoff) {
@@ -414,6 +438,7 @@ export class Orchestrator {
             `session ${legNumber} hitting handoff (${trigger}) at ` +
               `${usage ? `${(usage.pct * 100).toFixed(1)}%` : 'unknown'} context`,
           )
+          this.notifier.emit('handoff', { leg, reason: trigger })
           input.push(
             buildHandoffPrompt({
               legNumber,
@@ -471,6 +496,7 @@ export class Orchestrator {
       `session ${legNumber} ended (${leg.outcome}) after ${leg.turns} turns, ` +
         `$${leg.costUsd.toFixed(3)}`,
     )
+    this.notifier.emit('leg_ended', { leg })
 
     const continueRun =
       leg.outcome === 'handoff' ||

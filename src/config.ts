@@ -1,6 +1,22 @@
 import { readFileSync, existsSync } from 'node:fs'
 import { resolve, isAbsolute } from 'node:path'
 import type { InfiniteConfig, ToolPolicy } from './types.ts'
+import { ALL_EVENTS } from './notify/types.ts'
+import type { NotifyEventName } from './notify/types.ts'
+
+/**
+ * A useful default: the moments an operator actually wants pushed to a phone.
+ * `leg_ended` is deliberately absent — `handoff` plus `leg_started` already
+ * cover the same transition without doubling the message count.
+ */
+const DEFAULT_NOTIFY_EVENTS: NotifyEventName[] = [
+  'handoff',
+  'leg_started',
+  'run_complete',
+  'run_blocked',
+  'run_stopped',
+  'run_error',
+]
 
 const DEFAULT_TOOL_POLICY: ToolPolicy = {
   allowTools: [
@@ -115,6 +131,14 @@ function defaults(cwd: string): InfiniteConfig {
       port: 4319,
       token: process.env.INFINITE_TOKEN ?? null,
     },
+
+    notifications: {
+      enabled: false,
+      events: DEFAULT_NOTIFY_EVENTS,
+      minSeverity: 'info',
+      dashboardUrl: null,
+      channels: [],
+    },
   }
 }
 
@@ -140,6 +164,41 @@ function abs(cwd: string, p: string): string {
   return isAbsolute(p) ? p : resolve(cwd, p)
 }
 
+/**
+ * Expands `${VAR}` from the environment throughout the config file so secrets —
+ * messenger tokens above all — stay out of a file that gets committed. A missing
+ * variable is an error rather than an empty string: silently sending an
+ * unauthenticated request is worse than refusing to start.
+ *
+ * `{{field}}` placeholders used by notification templates are a different syntax
+ * and pass through untouched.
+ */
+function expandEnv(value: unknown, file: string, path = ''): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_whole, name: string) => {
+      const found = process.env[name]
+      if (found === undefined) {
+        throw new Error(
+          `${file} refers to \${${name}}${path ? ` at ${path}` : ''} but that ` +
+            `environment variable is not set`,
+        )
+      }
+      return found
+    })
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, i) => expandEnv(item, file, `${path}[${i}]`))
+  }
+  if (isRecord(value)) {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = expandEnv(v, file, path ? `${path}.${k}` : k)
+    }
+    return out
+  }
+  return value
+}
+
 export type LoadOptions = {
   cwd?: string
   configFile?: string
@@ -162,7 +221,7 @@ export function loadConfig(opts: LoadOptions = {}): InfiniteConfig {
       throw new Error(`Could not parse ${file}: ${(err as Error).message}`)
     }
     if (!isRecord(parsed)) throw new Error(`${file} must contain a JSON object`)
-    cfg = merge(cfg, parsed)
+    cfg = merge(cfg, expandEnv(parsed, file) as Record<string, unknown>)
   }
 
   if (opts.overrides) cfg = merge(cfg, opts.overrides)
@@ -198,6 +257,59 @@ function validate(cfg: InfiniteConfig): void {
   if (!existsSync(cfg.cwd)) throw new Error(`cwd does not exist: ${cfg.cwd}`)
   if (cfg.toolPolicy.fallback !== 'allow' && cfg.toolPolicy.fallback !== 'deny') {
     throw new Error(`toolPolicy.fallback must be "allow" or "deny"`)
+  }
+  validateNotifications(cfg)
+}
+
+function validateNotifications(cfg: InfiniteConfig): void {
+  const n = cfg.notifications
+  const seen = new Set<string>()
+
+  for (const event of n.events) {
+    if (!ALL_EVENTS.includes(event)) {
+      throw new Error(
+        `notifications.events contains unknown event "${event}". Valid: ${ALL_EVENTS.join(', ')}`,
+      )
+    }
+  }
+
+  for (const channel of n.channels) {
+    if (!channel.name) throw new Error('every notification channel needs a "name"')
+    if (seen.has(channel.name)) {
+      throw new Error(`duplicate notification channel name "${channel.name}"`)
+    }
+    seen.add(channel.name)
+
+    for (const event of channel.events ?? []) {
+      if (!ALL_EVENTS.includes(event)) {
+        throw new Error(
+          `channel "${channel.name}" subscribes to unknown event "${event}". ` +
+            `Valid: ${ALL_EVENTS.join(', ')}`,
+        )
+      }
+    }
+
+    if (channel.kind === 'webhook' || channel.kind === 'knox') {
+      if (!channel.url) {
+        throw new Error(`channel "${channel.name}" (${channel.kind}) needs a "url"`)
+      }
+      try {
+        new URL(channel.url)
+      } catch {
+        throw new Error(`channel "${channel.name}" has an invalid url: ${channel.url}`)
+      }
+    } else if (channel.kind === 'command') {
+      if (!channel.command) throw new Error(`channel "${channel.name}" (command) needs a "command"`)
+    } else {
+      const kind = (channel as { kind: string }).kind
+      throw new Error(
+        `channel "${channel.name}" has unknown kind "${kind}". Valid: webhook, knox, command`,
+      )
+    }
+  }
+
+  if (n.enabled && n.channels.length === 0) {
+    throw new Error('notifications.enabled is true but notifications.channels is empty')
   }
 }
 

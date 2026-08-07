@@ -166,6 +166,19 @@ ul.tasks li s { color: var(--muted); }
     </section>
 
     <section class="card">
+      <h2>Notifications</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button id="btn-mute" style="flex:1">Mute</button>
+        <button id="btn-notify-test">Send test</button>
+      </div>
+      <ul class="tasks" id="channels"></ul>
+      <details style="margin-top:10px">
+        <summary class="muted" style="cursor:pointer;font-size:12px">Subscribed events</summary>
+        <div id="events" style="margin-top:8px;display:grid;gap:4px;font-size:12px"></div>
+      </details>
+    </section>
+
+    <section class="card">
       <h2>Activity</h2>
       <div class="log" id="log"></div>
     </section>
@@ -233,11 +246,62 @@ function render(state) {
     + '<span class="muted" style="margin-left:auto">' + t.status + '</span></li>'
   ).join('') || '<li class="muted">Nothing queued.</li>';
 
+  renderNotifications(state);
+
   const paused = state.status === 'paused';
   $('btn-pause').textContent = paused ? 'Resume' : 'Pause';
   const dead = ['stopped', 'complete', 'error', 'blocked', 'idle'].includes(state.status);
   $('btn-handoff').disabled = dead;
   $('btn-stop').disabled = dead;
+}
+
+const ALL_EVENTS = ['run_started','leg_started','handoff','leg_ended','run_complete','run_blocked','run_stopped','run_error'];
+
+function renderNotifications(state) {
+  const muted = state.notifications?.muted ?? false;
+  $('btn-mute').textContent = muted ? 'Unmute' : 'Mute';
+
+  const channels = state.channels ?? [];
+  $('channels').innerHTML = channels.length
+    ? channels.map((c) => {
+        const off = !c.enabled || c.disabledAtRuntime;
+        const last = c.lastResult
+          ? (c.lastResult.ok ? 'ok' : 'FAILED: ' + esc(c.lastResult.detail).slice(0, 80))
+          : 'not sent yet';
+        return '<li style="flex-direction:column;align-items:stretch;gap:3px">'
+          + '<div style="display:flex;gap:8px;align-items:center">'
+          + '<b>' + esc(c.name) + '</b>'
+          + '<span class="tag">' + esc(c.kind) + '</span>'
+          + '<button data-ch="' + esc(c.name) + '" data-on="' + (off ? '1' : '0') + '"'
+          + ' style="margin-left:auto;padding:2px 9px;font-size:12px">'
+          + (off ? 'Enable' : 'Disable') + '</button></div>'
+          + '<div class="muted" style="font-size:11px;word-break:break-all">' + esc(c.target) + '</div>'
+          + '<div class="muted" style="font-size:11px">' + last + '</div>'
+          + '</li>';
+      }).join('')
+    : '<li class="muted">No channels configured.</li>';
+
+  for (const btn of $('channels').querySelectorAll('button[data-ch]')) {
+    btn.onclick = () => post('notifications', {
+      action: btn.dataset.on === '1' ? 'enable' : 'disable',
+      channel: btn.dataset.ch,
+    });
+  }
+
+  const subscribed = new Set(state.notifications?.events ?? []);
+  $('events').innerHTML = ALL_EVENTS.map((e) =>
+    '<label style="display:flex;gap:7px;align-items:center;cursor:pointer">'
+    + '<input type="checkbox" data-ev="' + e + '"' + (subscribed.has(e) ? ' checked' : '') + '>'
+    + '<span>' + e + '</span></label>'
+  ).join('');
+
+  for (const box of $('events').querySelectorAll('input[data-ev]')) {
+    box.onchange = () => {
+      const picked = [...$('events').querySelectorAll('input[data-ev]')]
+        .filter((b) => b.checked).map((b) => b.dataset.ev);
+      post('notifications', { action: 'events', events: picked });
+    };
+  }
 }
 
 function esc(s) {
@@ -280,6 +344,24 @@ $('btn-task').onclick = () => {
 };
 $('task-input').onkeydown = (e) => { if (e.key === 'Enter') $('btn-task').click(); };
 $('handoff-pick').onchange = (e) => loadHandoff(e.target.value);
+$('btn-mute').onclick = () => post('notifications', { action: $('btn-mute').textContent === 'Mute' ? 'mute' : 'unmute' });
+$('btn-notify-test').onclick = async () => {
+  const btn = $('btn-notify-test');
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try {
+    const res = await fetch('api/notifications', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'test' }),
+    });
+    const body = await res.json();
+    const results = body.results ?? [];
+    alert(results.length
+      ? results.map((r) => r.channel + ': ' + (r.ok ? 'ok' : 'FAILED — ' + r.detail)).join('\\n')
+      : 'No enabled channels to test.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Send test';
+  }
+};
 
 const es = new EventSource('api/events' + (token ? '?token=' + encodeURIComponent(token) : ''));
 es.addEventListener('state', (e) => render(JSON.parse(e.data)));
