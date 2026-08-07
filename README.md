@@ -1,5 +1,7 @@
 # infinite
 
+[![CI](https://github.com/89sooner/infinite/actions/workflows/ci.yml/badge.svg)](https://github.com/89sooner/infinite/actions/workflows/ci.yml)
+
 하나의 미션을 **무제한 개수의 Claude Code 세션에 걸쳐** 이어서 수행하는 데몬입니다.
 
 세션의 컨텍스트가 임계값(기본 80%)에 도달하면 자동으로 핸드오프 문서를 쓰게 하고, 세션을
@@ -416,6 +418,23 @@ compact가 임계값보다 먼저 발동하면 경고를 남기므로 로그에�
     leg-001.md
     leg-002.md
 ```
+
+---
+
+## 개발
+
+```bash
+npm ci
+npm run typecheck     # tsc --noEmit
+npm test              # node --test
+```
+
+테스트는 **Claude API를 호출하지 않습니다.** 순수 로직과 로컬 IO만 다루므로 자격 증명 없이
+수 초 안에 끝납니다. 커버 범위: 도구 정책 판정(복합 명령 분해, 단어 경계), 상태 줄·핸드오프
+프롬프트 생성, 알림 템플릿 렌더링과 채널 전송(임시 HTTP 서버 대상), 설정 병합·검증·환경변수
+치환, 상태 영속화와 손상 복구, CLI 명령.
+
+GitHub Actions에서 push(main)와 모든 PR에 대해 같은 두 명령이 돌아갑니다.
 
 ---
 
