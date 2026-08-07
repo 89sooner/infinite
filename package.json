@@ -1,0 +1,26 @@
+{
+  "name": "infinite",
+  "version": "0.1.0",
+  "description": "Run a Claude Code agent on one mission across unlimited sessions, with automatic context-threshold handoffs.",
+  "type": "module",
+  "bin": {
+    "infinite": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts run",
+    "dashboard": "node src/cli.ts run --server",
+    "status": "node src/cli.ts status",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.224"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
+}

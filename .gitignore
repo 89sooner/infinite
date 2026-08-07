@@ -1,0 +1,6 @@
+node_modules/
+.infinite/
+infinite.config.json
+MISSION.md
+*.log
+.DS_Store
