@@ -101,10 +101,16 @@ export type ToolPolicy = {
   allowTools: string[]
   /** Tool names always denied. */
   denyTools: string[]
-  /** Bash command prefixes allowed (matched against the start of the command). */
+  /** Bash command prefixes allowed, matched per segment at a word boundary. */
   allowBash: string[]
-  /** Bash substrings that force a denial, checked before allowBash. */
+  /** Command prefixes that force a denial, checked before allowBash. */
   denyBash: string[]
+  /**
+   * Paths that destructive commands (rm, rmdir, shred, mv, chmod, chown) may
+   * never target, directly or by containing them. `~` is expanded. The working
+   * directory and its ancestors are always protected in addition to these.
+   */
+  protectedPaths: string[]
   /** What to do when nothing matched: 'allow' is unattended-permissive, 'deny' is safe. */
   fallback: 'allow' | 'deny'
 }
