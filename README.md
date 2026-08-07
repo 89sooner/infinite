@@ -113,6 +113,110 @@ node /path/to/infinite/src/cli.ts run --cwd ~/work/my-project --server
 
 ---
 
+## 실제 실행 예시
+
+`infinite`를 **이 저장소 자신에게** 붙여, 명령어 세 개(`stats`, `export`, `doctor`)를
+각각 테스트와 함께 구현하라는 미션을 줬습니다. 아래는 그 실행의 실제 기록입니다.
+
+### 결과
+
+```
+session 1   3 turns   handoff (turns)   context 13% (126,562 / 967,000)   $2.60
+session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
+                                                              합계 4턴, $4.29
+```
+
+세션 1이 두 개를 구현하고 핸드오프를 남긴 뒤 종료, 세션 2가 **그 문서만 읽고** 나머지
+하나를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 88 → 119개로
+전부 통과, `tsc --noEmit` 클린이었습니다.
+
+> **주의**: 이 실행은 80% 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를
+> 유도했습니다(1M 컨텍스트를 80%까지 채우려면 비용이 과합니다). 트리거 사유만
+> `turns`로 다를 뿐 생성되는 문서는 동일합니다. 모델은 `sonnet`.
+
+### 세션 1이 남긴 핸드오프
+
+16,816자, 여섯 섹션의 분량 배분:
+
+| 섹션 | 분량 |
+|---|---|
+| STATE | 1,246자 |
+| NEXT STEPS | 6,345자 |
+| FACTS AND DECISIONS | 4,860자 |
+| DEAD ENDS | 2,160자 |
+| OPEN QUESTIONS | 620자 |
+| FILES | 1,446자 |
+
+아래 인용은 실제 문서에서 가져왔으며, 길이 때문에 일부는 축약했습니다.
+
+**STATE** — VERIFIED와 ASSUMED가 실제로 구분됩니다:
+
+```markdown
+- VERIFIED: `infinite doctor` (the third and final command) has NOT been started. No
+  `src/doctor.ts` exists, no `doctor` branch in `src/cli.ts`, no `test/doctor.test.ts`.
+- VERIFIED: `npm test` passes 104/104, 0 failures (ran it after both completed commands).
+- ASSUMED (not re-verified this leg, but true as of last check): the repo has no `.git`
+  — `git status`/commits are not part of this workflow, do not attempt them.
+```
+
+**NEXT STEPS** — 파일과 줄 번호를 짚고, 설계 선택지를 근거와 함께 남깁니다:
+
+```markdown
+- Confirm every notification channel is well-formed — `validateNotifications(cfg)` inside
+  `src/config.ts` (around line 264) already does exactly this validation, but it runs
+  unconditionally during `loadConfig()` and throws on the first bad channel rather than
+  reporting all of them. For `doctor` to report every check individually you likely need
+  either (a) call `loadConfig()` in a try/catch and treat any thrown message as one failed
+  check, or (b) write a parallel non-throwing validator. Recommend (a) — config.ts's
+  existing error messages already ARE the specific remedies. Do not duplicate that logic.
+```
+
+**DEAD ENDS** — 다음 세션이 같은 실패를 반복하지 않게 하는 부분입니다:
+
+```markdown
+- Tried using `sed -n`, `awk`, and inline `python3 -c` via Bash — all blocked by this
+  environment's tool policy. Workaround that DOES work: `grep -oP ... | wc -c`, or just
+  Read the file. Expect this same restriction to apply to doctor work — don't waste turns
+  retrying sed/awk/python one-liners.
+- Tried chaining `cd <dir> && node ... && cat ...` in one Bash call — blocked outright.
+  One command per Bash call, absolute paths, no `&&` chaining, no `cd`.
+```
+
+**FILES** — 무엇이 끝났고 무엇이 남았는지 파일 단위로:
+
+```markdown
+- `src/stats.ts` — new. Pure `computeStats`/`formatStats`. Complete, tested, do not revisit.
+- `src/cli.ts` — modified. Added imports, two USAGE lines, two `if (command === ...)` blocks,
+  and a `readMissionText()` helper. No existing command logic changed. NEXT: needs a third
+  USAGE line + `if (command === 'doctor')` block.
+- `README.md` — NOT modified yet (CLI docs at ~line 156-176 are now stale). Deferred.
+```
+
+### 효과 측정
+
+`DEAD ENDS`가 실제로 작동했는지 이벤트 로그로 확인했습니다.
+
+| | 도구 호출 | 정책에 거부됨 |
+|---|---|---|
+| 세션 1 (맨땅에서 시작) | 32회 | **5회** |
+| 세션 2 (핸드오프 읽고 시작) | 19회 | **1회** |
+
+세션 2는 같은 벽에 다시 부딪히지 않았습니다.
+
+### 부수 효과: 핸드오프가 도구의 결함을 신고했다
+
+위 `DEAD ENDS`에 적힌 제약들은 사실 **정상 동작이 아니라 버그였습니다.** 파고들어 보니
+`denyBash`의 `"rm -rf /"`가 단순 부분 문자열 매칭이라 `rm -rf /tmp/scratch/build`까지
+막고 있었고, 따옴표 안의 `;`로 명령을 분해하는 바람에 `python3 -c "..."`가 통째로
+거부됐으며, `mkfs.ext4`는 오히려 그냥 통과하고 있었습니다. 전부 수정했습니다
+([보안](#보안) 참조).
+
+에이전트가 무엇과 싸웠는지가 문서에 남으므로, `DEAD ENDS`는 다음 세션을 위한 메모인
+동시에 **운영자가 정책과 미션 문구에서 고칠 곳을 찾는 단서**이기도 합니다. 주기적으로
+훑어볼 가치가 있습니다.
+
+---
+
 ## 세션 프로토콜
 
 에이전트는 매 응답을 상태 줄로 끝냅니다.
