@@ -341,13 +341,56 @@ curl -X POST $HOST/api/notifications -H 'Content-Type: application/json' \
 
 **1. 도구 정책 (기본, 권장)** — `permissionMode: "default"`일 때 명시적 허용목록으로 판단합니다.
 
-- `allowTools` — 무조건 허용할 도구
-- `allowBash` — 허용할 명령 접두사. 복합 명령은 `&&`, `||`, `;`, `|`, 줄바꿈으로 분해해
-  **모든 조각이 각각 통과해야** 허용됩니다. `git status && rm -rf /etc`는 차단됩니다
-- `denyBash` — 우선 검사되는 금지 패턴
-- `fallback` — 어디에도 안 걸렸을 때. 기본 `"deny"`
+| 키 | 역할 |
+|---|---|
+| `allowTools` | 무조건 허용할 도구. `"mcp__github"`처럼 MCP 서버 단위 허용도 됩니다 |
+| `denyTools` | 무조건 거부할 도구 |
+| `allowBash` | 허용할 명령 접두사 |
+| `denyBash` | 우선 검사되는 금지 명령 접두사 |
+| `protectedPaths` | 파괴적 명령이 건드릴 수 없는 경로 |
+| `fallback` | 어디에도 안 걸렸을 때. 기본 `"deny"` |
 
 거부는 도구 에러로 전달되므로 에이전트는 멈추지 않고 우회하거나 `OPEN QUESTIONS`에 기록합니다.
+
+**복합 명령은 조각으로 분해되어 각각 검사됩니다.** `&&`, `||`, `;`, `|`, 줄바꿈, 그리고
+명령 치환(`$(...)`, 백틱)이 경계입니다. 따옴표 안의 연산자는 연산자가 아니므로
+`python3 -c "import json; print(1)"`은 한 조각입니다. `echo $(rm -rf /etc)`는 안쪽 명령이
+독립적으로 검사되어 차단됩니다.
+
+접두사 매칭은 단어 경계에서만 걸립니다. `allowBash`의 `git status`가 `git statusfoo`를
+허용하지 않고, `denyBash`는 조금 더 넓게 잡아 `mkfs`가 `mkfs.ext4`도 막습니다.
+어느 쪽이든 명령 **시작 위치**에서만 매칭되므로 `echo "shutdown at 5pm"` 같은 문장은
+오탐되지 않습니다.
+
+`FOO=bar npm test`처럼 앞에 붙은 환경변수 할당은 벗겨낸 뒤 판단합니다.
+
+### protectedPaths
+
+`rm`, `rmdir`, `shred`, `mv`, `chmod`, `chown`의 **인자 경로를 실제로 해석해서** 검사합니다.
+출력 리디렉션(`>`, `>>`) 대상도 같은 검사를 받습니다. `~`, `$HOME`, 상대 경로, 후행
+글로브가 모두 해석됩니다.
+
+차단 대상:
+
+- 목록에 있는 경로 그 자체 (`rm -rf /etc`)
+- 그 경로를 **포함하는** 상위 경로 (`rm -rf /`)
+- 그 경로 **안쪽** 경로 (`rm -rf /usr/lib` — `/usr`가 보호 대상이므로)
+- **작업 디렉터리 자신과 그 상위** (`rm -rf .`, `rm -rf ..`) — 목록에 없어도 항상
+
+작업 디렉터리 안쪽은 에이전트의 영역이라 허용됩니다. 프로젝트가 홈 디렉터리 아래 있어도
+`rm -rf ./build`가 막히지 않는 이유입니다.
+
+`protectedPaths` 검사는 `fallback: "allow"`에서도 유지됩니다. 허용목록 설정으로 뚫을 수
+없는 마지막 방어선입니다.
+
+### 기본값에서 빠져 있는 것
+
+의도적으로 뺐습니다. 필요하면 `allowBash`에 추가하세요.
+
+- **`git push`** — 무인 에이전트가 원격에 발행하는 것은 명시적 선택이어야 합니다.
+  추가하더라도 `git push --force`/`-f`는 `denyBash`가 계속 막습니다
+- **`curl`, `wget`, `ssh`, `nc`** — 네트워크 송신
+- **`sh -c`, `bash -c`** — 조각 분해를 우회합니다
 
 **2. `--bypass-permissions`** — 전부 승인. 격리된 컨테이너에서만 쓰세요.
 **root에서는 Claude Code가 거부하므로 전용 non-root 계정이 필요합니다.**

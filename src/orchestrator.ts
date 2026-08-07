@@ -522,7 +522,7 @@ export class Orchestrator {
     }
 
     if (this.cfg.permissionMode !== 'bypassPermissions') {
-      opts.canUseTool = buildPermissionHandler(this.cfg.toolPolicy, this.store)
+      opts.canUseTool = buildPermissionHandler(this.cfg.toolPolicy, this.store, this.cfg.cwd)
     }
     if (this.cfg.model) opts.model = this.cfg.model
     if (this.cfg.effort) opts.effort = this.cfg.effort
