@@ -4,9 +4,14 @@ import { timingSafeEqual } from 'node:crypto'
 import type { Store } from './store.ts'
 import type { Orchestrator } from './orchestrator.ts'
 import type { Event, InfiniteConfig, RunState } from './types.ts'
+import type { ChannelStatus, NotifyEventName } from './notify/types.ts'
+import { ALL_EVENTS } from './notify/types.ts'
 import { dashboardHtml } from './ui.ts'
 
-type Snapshot = RunState & { config: { handoffThreshold: number; maxLegs: number } }
+type Snapshot = RunState & {
+  config: { handoffThreshold: number; maxLegs: number }
+  channels: ChannelStatus[]
+}
 
 export function startServer(
   cfg: InfiniteConfig,
@@ -41,12 +46,12 @@ export function startServer(
     }
 
     if (path === '/api/state' && req.method === 'GET') {
-      send(res, 200, snapshot(cfg, store))
+      send(res, 200, snapshot(cfg, store, orch))
       return
     }
 
     if (path === '/api/events' && req.method === 'GET') {
-      streamEvents(res, cfg, store)
+      streamEvents(res, cfg, store, orch)
       return
     }
 
@@ -71,6 +76,58 @@ export function startServer(
       }
       orch.addTask(text)
       send(res, 200, { ok: true })
+      return
+    }
+
+    if (path === '/api/notifications' && req.method === 'POST') {
+      const body = await readJson(req)
+      const action = String(body.action ?? '')
+      const channel = typeof body.channel === 'string' ? body.channel : null
+
+      switch (action) {
+        case 'mute':
+          orch.notifier.setMuted(true)
+          break
+        case 'unmute':
+          orch.notifier.setMuted(false)
+          break
+        case 'enable':
+        case 'disable': {
+          if (!channel) {
+            send(res, 400, { error: 'channel is required' })
+            return
+          }
+          if (!orch.notifier.setChannelEnabled(channel, action === 'enable')) {
+            send(res, 404, { error: `no channel named "${channel}"` })
+            return
+          }
+          break
+        }
+        case 'events': {
+          const raw = Array.isArray(body.events) ? body.events : null
+          if (!raw) {
+            send(res, 400, { error: 'events must be an array' })
+            return
+          }
+          const unknown = raw.filter((e) => !ALL_EVENTS.includes(e as NotifyEventName))
+          if (unknown.length > 0) {
+            send(res, 400, { error: `unknown events: ${unknown.join(', ')}` })
+            return
+          }
+          orch.notifier.setEvents(raw as NotifyEventName[])
+          break
+        }
+        case 'test': {
+          const results = await orch.notifier.test()
+          send(res, 200, { ok: true, results })
+          return
+        }
+        default:
+          send(res, 400, { error: `unknown action "${action}"` })
+          return
+      }
+
+      send(res, 200, { ok: true, channels: orch.notifier.status() })
       return
     }
 
@@ -116,14 +173,22 @@ export function startServer(
   return server
 }
 
-function snapshot(cfg: InfiniteConfig, store: Store): Snapshot {
+function snapshot(cfg: InfiniteConfig, store: Store, orch: Orchestrator): Snapshot {
   return {
     ...store.state,
     config: { handoffThreshold: cfg.handoffThreshold, maxLegs: cfg.maxLegs },
+    // Channel status is already redacted — it never carries urls with
+    // credentials or header values.
+    channels: orch.notifier.status(),
   }
 }
 
-function streamEvents(res: ServerResponse, cfg: InfiniteConfig, store: Store): void {
+function streamEvents(
+  res: ServerResponse,
+  cfg: InfiniteConfig,
+  store: Store,
+  orch: Orchestrator,
+): void {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache, no-transform',
@@ -136,9 +201,9 @@ function streamEvents(res: ServerResponse, cfg: InfiniteConfig, store: Store): v
   }
 
   write('history', store.recentEvents(200))
-  write('state', snapshot(cfg, store))
+  write('state', snapshot(cfg, store, orch))
 
-  const onState = (s: RunState) => write('state', { ...s, config: { handoffThreshold: cfg.handoffThreshold, maxLegs: cfg.maxLegs } })
+  const onState = (_s: RunState) => write('state', snapshot(cfg, store, orch))
   const onEvent = (e: Event) => write('log', e)
   store.on('state', onState)
   store.on('event', onEvent)

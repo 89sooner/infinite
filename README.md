@@ -146,8 +146,10 @@ INFINITE_STATUS: BLOCKED: <이유>        # 사람의 판단 필요
 | `stopOnBlocked` | `false` | `BLOCKED` 보고 시 실행 중단 |
 | `idleNudge` | 내장 문구 | 큐가 비었을 때 보낼 메시지 |
 | `server` | `{...}` | 대시보드 설정 |
+| `notifications` | `{...}` | 메신저 알림 — [알림](#알림) 참조 |
 
 환경변수: `INFINITE_THRESHOLD`, `INFINITE_PORT`, `INFINITE_TOKEN`, `INFINITE_MODEL`
+설정 파일 안의 `${VAR}`는 환경변수로 치환됩니다(비밀값 분리용).
 
 ### CLI
 
@@ -156,6 +158,8 @@ infinite run [옵션]        실행 (또는 이어서 실행)
 infinite status            현재 상태 출력
 infinite init              설정 파일과 MISSION.md 생성
 infinite handoff <n>       n번 세션의 핸드오프 출력
+infinite notify-test       설정된 모든 채널로 테스트 알림 전송
+infinite notify <on|off>   알림 허용 / 음소거
 
   --cwd <dir>            에이전트 작업 디렉터리
   --threshold <0-1>      핸드오프 임계값
@@ -195,6 +199,137 @@ infinite handoff <n>       n번 세션의 핸드오프 출력
 | `GET` | `/api/handoff/:n` | 핸드오프 원문 |
 | `POST` | `/api/tasks` | `{"text": "..."}` 지시 추가 |
 | `POST` | `/api/control` | `{"action": "pause"\|"resume"\|"handoff"\|"stop"}` |
+| `POST` | `/api/notifications` | 알림 제어 — [알림 허용/거부](#알림-허용거부) 참조 |
+
+---
+
+## 알림
+
+세션 전환·종료 같은 이벤트를 사내 메신저로 보냅니다. **메신저별 코드가 없습니다** —
+HTTP 엔드포인트에 JSON을 POST하는 범용 채널이고, 어떤 형태로 보낼지는 설정으로 정합니다.
+Knox든 다른 무엇이든 **URL·헤더·바디 템플릿만 채우면** 붙습니다.
+
+### 이벤트
+
+| 이벤트 | 언제 | 심각도 |
+|---|---|---|
+| `run_started` | 실행 시작 | info |
+| `leg_started` | 새 세션이 인계받음 (**재기동**) | info |
+| `handoff` | 임계값 도달, 핸드오프 작성 시작 | info |
+| `leg_ended` | 세션 종료 | info |
+| `run_complete` | 미션 완료 (**종료**) | info |
+| `run_blocked` | 사람 판단 필요 (**종료**) | warn |
+| `run_stopped` | 중단·상한 도달 (**종료**) | warn |
+| `run_error` | 실패 (**종료**) | error |
+
+기본 구독: `handoff`, `leg_started`, `run_complete`, `run_blocked`, `run_stopped`, `run_error`.
+`leg_ended`는 `handoff` + `leg_started`와 겹쳐서 기본에서 뺐습니다.
+
+### 설정
+
+```jsonc
+"notifications": {
+  "enabled": true,
+  "events": ["handoff", "leg_started", "run_complete", "run_blocked", "run_stopped", "run_error"],
+  "minSeverity": "info",
+  "dashboardUrl": "http://infra01:4319",   // 메시지에 링크로 들어감
+  "channels": [
+    {
+      "name": "knox",
+      "kind": "knox",                       // knox = webhook과 동일 동작, 이름만 구분용
+      "enabled": true,
+      "url": "https://knox-api.내부도메인/v1/message",
+      "method": "POST",
+      "headers": { "Authorization": "Bearer ${KNOX_TOKEN}" },
+      "bodyTemplate": {
+        "roomId": "${KNOX_ROOM_ID}",
+        "text": "{{title}}\n{{text}}\n\n{{dashboardUrl}}"
+      },
+      "events": ["handoff", "run_error"],   // 이 채널만 좁히기 (생략하면 전역 설정)
+      "minSeverity": "info",
+      "minIntervalSec": 0,                  // 같은 이벤트 재전송 억제 (초)
+      "retries": 2,
+      "timeoutMs": 10000
+    }
+  ]
+}
+```
+
+**Knox 붙이는 법:** 사내망에서 `url`·`headers`·`bodyTemplate` 세 개만 실제 API 규격에 맞추면
+끝입니다. 코드 수정은 필요 없습니다. `bodyTemplate`을 생략하면 아래 페이로드 전체가 그대로
+전송되므로, 중계 서버를 두는 방식이라면 그게 더 편합니다.
+
+### 두 가지 자리표시자 문법
+
+혼동하기 쉬우니 구분해두세요. 서로 간섭하지 않습니다.
+
+| 문법 | 치환 시점 | 용도 |
+|---|---|---|
+| `${VAR}` | 설정 로드 시 (환경변수) | **토큰 등 비밀값** |
+| `{{field}}` | 전송 시 (이벤트 페이로드) | 메시지 내용 |
+
+`${VAR}`가 가리키는 환경변수가 없으면 **즉시 에러로 중단됩니다.** 인증 없이 조용히 요청이
+나가는 것보다 낫기 때문입니다. 토큰을 설정 파일에 직접 넣지 마세요.
+
+### 페이로드 필드
+
+`{{title}}`, `{{text}}`, `{{event}}`, `{{severity}}`, `{{at}}`, `{{host}}`, `{{project}}`,
+`{{mission}}`, `{{status}}`, `{{leg}}`, `{{legOutcome}}`, `{{legSummary}}`, `{{reason}}`,
+`{{contextPct}}`, `{{contextTokens}}`, `{{contextMaxTokens}}`, `{{totalCostUsd}}`,
+`{{totalTurns}}`, `{{totalLegs}}`, `{{dashboardUrl}}`
+
+실제 전송 예시:
+
+```
+[infinite/my-project] session 2 handing off :: Reason: context.
+Context 79.4% (158,812 / 200,000). A handoff document is being written;
+a new session will continue from it.
+```
+
+### command 채널
+
+HTTP로 직접 못 나가고 래퍼 바이너리나 mTLS 프록시를 거쳐야 하는 망이라면:
+
+```jsonc
+{
+  "name": "knox-cli",
+  "kind": "command",
+  "enabled": true,
+  "command": "/opt/knox/send",     // 셸을 거치지 않음 (argv 배열로 전달)
+  "args": ["--room", "ops", "--text", "{{title}}"],
+  "stdin": true                     // JSON 페이로드가 stdin으로 들어감 (기본값)
+}
+```
+
+### 알림 허용/거부
+
+| 방법 | 명령 |
+|---|---|
+| 전체 음소거 | `infinite notify off` / `infinite notify on` |
+| 채널 개별 | 대시보드의 Enable/Disable 버튼 |
+| 이벤트 선택 | 대시보드 "Subscribed events" 체크박스 |
+| 전송 테스트 | `infinite notify-test` 또는 대시보드 "Send test" |
+
+음소거·채널 상태·구독 이벤트는 `state.json`에 저장되므로 **재시작해도 유지됩니다.**
+설정 파일의 `enabled: false`는 영구 차단, 런타임 토글은 일시 차단으로 구분됩니다.
+
+API로도 제어할 수 있습니다:
+
+```bash
+curl -X POST $HOST/api/notifications -H 'Content-Type: application/json' \
+  -d '{"action":"mute"}'                                  # mute | unmute
+  -d '{"action":"disable","channel":"knox"}'               # enable | disable
+  -d '{"action":"events","events":["handoff","run_error"]}'
+  -d '{"action":"test"}'
+```
+
+### 동작 보장
+
+- **전송 실패가 실행을 막지 않습니다.** 메신저가 죽어 있어도 에이전트는 계속 일합니다.
+- 실패 시 지수 백오프로 재시도합니다(기본 2회, 1s → 2s).
+- 종료 이벤트는 프로세스가 끝나기 전 최대 12초까지 전송을 기다립니다.
+- `/api/state`는 **자격 증명을 절대 노출하지 않습니다.** URL의 password와 token류 쿼리
+  파라미터는 마스킹되고, 헤더는 아예 전달되지 않습니다.
 
 ---
 
@@ -232,6 +367,8 @@ Type=simple
 User=infinite
 WorkingDirectory=/srv/projects/my-project
 Environment=INFINITE_TOKEN=change-me
+# 메신저 자격 증명은 설정 파일이 아니라 여기에 (또는 EnvironmentFile=)
+Environment=KNOX_TOKEN=...
 ExecStart=/usr/bin/node /opt/infinite/src/cli.ts run --server --host 127.0.0.1
 Restart=on-failure
 RestartSec=30

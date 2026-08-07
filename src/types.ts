@@ -1,4 +1,5 @@
 import type { EffortLevel, PermissionMode } from '@anthropic-ai/claude-agent-sdk'
+import type { NotificationsConfig, NotifyEventName } from './notify/types.ts'
 
 /** Why a leg (one Claude Code session) ended. */
 export type LegOutcome =
@@ -82,6 +83,17 @@ export type RunState = {
   /** Set when the operator asks for a handoff before the threshold is hit. */
   handoffRequested: boolean
   lastError: string | null
+  /** Runtime notification controls, persisted so they survive a restart. */
+  notifications: NotificationRuntime
+}
+
+export type NotificationRuntime = {
+  /** Global off switch, toggled from the dashboard or the API. */
+  muted: boolean
+  /** Channels switched off at runtime, by name. */
+  disabledChannels: string[]
+  /** Subscribed events; seeded from config on first run. */
+  events: NotifyEventName[]
 }
 
 export type ToolPolicy = {
@@ -144,4 +156,8 @@ export type InfiniteConfig = {
     /** Bearer token required for mutating API calls. */
     token: string | null
   }
+
+  notifications: NotificationsConfig
 }
+
+export type { NotificationsConfig, NotifyEventName } from './notify/types.ts'

@@ -15,6 +15,8 @@ Usage:
   infinite status             Print the current run state
   infinite init               Write a starter config and MISSION.md
   infinite handoff <n>        Print the handoff from session <n>
+  infinite notify-test        Send a test notification to every enabled channel
+  infinite notify <on|off>    Unmute or mute notifications for future runs
 
 Options:
   --cwd <dir>            Working directory for the agent      (default: .)
@@ -124,6 +126,39 @@ async function main(): Promise<void> {
     return
   }
 
+  if (command === 'notify-test') {
+    const store = new Store(cfg, { quiet: true })
+    const orch = new Orchestrator(cfg, store)
+    if (!cfg.notifications.enabled) {
+      process.stdout.write('notifications.enabled is false — sending anyway for this test.\n')
+    }
+    const results = await orch.notifier.test()
+    if (results.length === 0) {
+      process.stdout.write('No enabled channels are configured.\n')
+      process.exitCode = 1
+      return
+    }
+    for (const r of results) {
+      process.stdout.write(
+        `${r.ok ? 'ok  ' : 'FAIL'}  ${r.channel}  (${r.attempts} attempt${r.attempts > 1 ? 's' : ''}, ${r.ms}ms)` +
+          `${r.ok ? '' : `\n      ${r.detail}`}\n`,
+      )
+    }
+    process.exitCode = results.every((r) => r.ok) ? 0 : 1
+    return
+  }
+
+  if (command === 'notify') {
+    const arg = (positional[0] ?? '').toLowerCase()
+    if (arg !== 'on' && arg !== 'off') throw new Error('usage: infinite notify <on|off>')
+    const store = new Store(cfg, { quiet: true })
+    const orch = new Orchestrator(cfg, store)
+    orch.notifier.setMuted(arg === 'off')
+    store.flush()
+    process.stdout.write(`notifications ${arg === 'on' ? 'unmuted' : 'muted'}\n`)
+    return
+  }
+
   if (command !== 'run') throw new Error(`unknown command "${command}"\n\n${USAGE}`)
 
   await runCommand(cfg, flags.quiet === true)
@@ -209,6 +244,20 @@ function initProject(cwd: string): void {
           disableAutoCompact: false,
           stopOnBlocked: false,
           server: { enabled: true, host: '127.0.0.1', port: 4319, token: null },
+          notifications: {
+            enabled: false,
+            events: [
+              'handoff',
+              'leg_started',
+              'run_complete',
+              'run_blocked',
+              'run_stopped',
+              'run_error',
+            ],
+            minSeverity: 'info',
+            dashboardUrl: null,
+            channels: [],
+          },
         },
         null,
         2,
@@ -231,7 +280,11 @@ function initProject(cwd: string): void {
     process.stdout.write(`wrote ${templatePath}\n`)
   }
 
-  process.stdout.write('\nEdit MISSION.md, then run: infinite run --server\n')
+  process.stdout.write(
+    '\nEdit MISSION.md, then run: infinite run --server\n' +
+      'To push events to a messenger, add a channel under "notifications" — see the\n' +
+      'Notifications section of the README, then verify with: infinite notify-test\n',
+  )
 }
 
 const MISSION_STARTER = `# Mission

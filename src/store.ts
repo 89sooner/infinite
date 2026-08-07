@@ -37,6 +37,12 @@ export class Store extends EventEmitter {
         const prev = JSON.parse(readFileSync(this.stateFile, 'utf8')) as RunState
         // A run that was killed mid-flight should not claim to be running.
         if (prev.status === 'running' || prev.status === 'stopping') prev.status = 'stopped'
+        // State written before notifications existed, or by an older version.
+        prev.notifications = {
+          muted: prev.notifications?.muted ?? false,
+          disabledChannels: prev.notifications?.disabledChannels ?? [],
+          events: prev.notifications?.events ?? this.cfg.notifications.events,
+        }
         return prev
       } catch {
         // Corrupt state should not block a restart; keep it for forensics.
@@ -61,6 +67,11 @@ export class Store extends EventEmitter {
       totalTurns: 0,
       handoffRequested: false,
       lastError: null,
+      notifications: {
+        muted: false,
+        disabledChannels: [],
+        events: this.cfg.notifications.events,
+      },
     }
   }
 
