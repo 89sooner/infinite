@@ -93,7 +93,12 @@ export class Orchestrator {
   private maxOutputTokens: number | null = null
   /** The configured threshold after clamping to what this session can reach. */
   private threshold: number
-  private thresholdReported = false
+  /** Threshold value already warned about, so the same clamp is not re-logged. */
+  private thresholdReported: number | null = null
+  /** Largest window share a single turn has added, measured across the run. */
+  private turnGrowth: number | null = null
+  /** Context share at the end of the previous turn of the current leg. */
+  private lastPct: number | null = null
   readonly notifier: Notifier
 
   constructor(cfg: InfiniteConfig, store: Store) {
@@ -288,6 +293,10 @@ export class Orchestrator {
       s.currentLeg = legNumber
       s.handoffRequested = false
     })
+    // A new leg starts from a fresh context, so the first turn's jump is fixed
+    // cost rather than growth. Measured growth itself carries over — it is a
+    // property of the workload, not of one session.
+    this.lastPct = null
     this.store.info('leg', `session ${legNumber} starting`)
     this.notifier.emit('leg_started', { leg })
 
@@ -361,12 +370,8 @@ export class Orchestrator {
         this.recomputeTotalCost(leg)
 
         if (result.is_error || result.subtype !== 'success') {
-          const detail = `${result.subtype}${
-            'api_error_status' in result && result.api_error_status
-              ? ` (HTTP ${result.api_error_status})`
-              : ''
-          }`
-          this.store.error('leg', `session ${legNumber} turn failed: ${detail}`)
+          const detail = describeFailure(result)
+          this.store.error('leg', `session ${legNumber} turn failed — ${detail}`)
           leg.outcome = 'error'
           leg.reason = detail
           input.close()
@@ -562,21 +567,42 @@ export class Orchestrator {
     // a future version reports a fraction instead.
     const pct = raw.percentage > 1 ? raw.percentage / 100 : raw.percentage
 
-    // The reachable threshold depends on the model's output budget and on
-    // whether Claude Code compacts on its own, neither of which is known until a
-    // session is live.
+    // How much a turn adds is a property of the workload, so measure it rather
+    // than guess. The first turn of a leg carries the fixed cost of the system
+    // prompt and mission, which is not growth, so deltas only count from the
+    // second turn on. A drop means something compacted; that is not growth either.
+    if (this.lastPct !== null) {
+      const delta = pct - this.lastPct
+      if (delta > 0 && (this.turnGrowth === null || delta > this.turnGrowth)) {
+        this.turnGrowth = delta
+      }
+    }
+    this.lastPct = pct
+
+    // The reachable threshold depends on the model's output budget, on whether
+    // Claude Code compacts on its own, and on how far a single turn moves —
+    // none of which is known until a session is live.
     const resolved = effectiveHandoffThreshold({
       configured: this.cfg.handoffThreshold,
       maxTokens: raw.maxTokens,
       maxOutputTokens: this.maxOutputTokens,
       autoCompactThreshold: raw.autoCompactThreshold ?? null,
       autoCompactEnabled: raw.isAutoCompactEnabled,
+      turnGrowth: this.turnGrowth,
     })
     this.threshold = resolved.threshold
 
-    if (resolved.clamped && !this.thresholdReported) {
-      this.thresholdReported = true
-      this.store.warn('context', resolved.reason ?? 'handoff threshold clamped')
+    // Re-report if a bigger turn has since lowered the threshold further. A
+    // provisional clamp is only noted, not warned about: on a roomy window the
+    // assumed turn size is usually pessimistic and the first measurement lifts
+    // the threshold back to what was configured.
+    if (resolved.clamped && this.threshold !== this.thresholdReported) {
+      this.thresholdReported = this.threshold
+      this.store.log(
+        resolved.provisional ? 'debug' : 'warn',
+        'context',
+        resolved.reason ?? 'handoff threshold clamped',
+      )
     }
 
     const snapshot: ContextSnapshot = {
@@ -660,6 +686,35 @@ export class Orchestrator {
     }
     if (!this.stopRequested) this.store.info('control', 'continuing')
   }
+}
+
+/**
+ * Turns a failed result into something an operator can act on. The obvious
+ * fields disagree more often than you would expect — `is_error` can be set while
+ * the subtype still reads `success`, which on its own produced the memorable
+ * log line "turn failed: success" — so report everything that carries a signal.
+ */
+export function describeFailure(result: SDKResultMessage): string {
+  const parts: string[] = [`subtype=${result.subtype}`, `is_error=${result.is_error}`]
+
+  if (result.stop_reason) parts.push(`stop_reason=${result.stop_reason}`)
+  if ('api_error_status' in result && result.api_error_status) {
+    parts.push(`http=${result.api_error_status}`)
+  }
+  if ('terminal_reason' in result && result.terminal_reason) {
+    parts.push(`terminal_reason=${result.terminal_reason}`)
+  }
+  parts.push(`turns=${result.num_turns}`)
+
+  const text = 'result' in result && typeof result.result === 'string' ? result.result.trim() : ''
+  if (text) parts.push(`text="${truncate(text, 300)}"`)
+
+  return parts.join(' ')
+}
+
+function truncate(text: string, n: number): string {
+  const flat = text.replace(/\s+/g, ' ')
+  return flat.length <= n ? flat : `${flat.slice(0, n)}…`
 }
 
 function extractText(content: unknown): string {

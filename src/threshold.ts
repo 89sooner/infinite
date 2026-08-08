@@ -1,9 +1,17 @@
 /**
- * Room left below the ceiling for the handoff turn itself. The handoff response
- * is short — the document goes to a file — so this only has to cover the prompt
- * and a little slack.
+ * Smallest headroom worth keeping, used when a run has not yet seen a full turn
+ * of growth. Only has to cover the handoff turn itself, whose response is short
+ * because the document goes to a file.
  */
 export const HANDOFF_MARGIN = 0.03
+
+/**
+ * How much of the window a turn is assumed to add before the run has measured
+ * it. A turn that reads a file in slices can add fifteen points at once, and the
+ * threshold is only checked between turns, so assuming less than this risks
+ * sailing past the ceiling with no chance to hand off.
+ */
+export const ASSUMED_TURN_GROWTH = 0.15
 
 /** Never clamp below this; a threshold this low would restart constantly. */
 export const MIN_THRESHOLD = 0.25
@@ -21,15 +29,28 @@ export type ThresholdInput = {
   /** Token count at which Claude Code compacts on its own, if it is enabled. */
   autoCompactThreshold: number | null
   autoCompactEnabled: boolean
+  /**
+   * Largest share of the window a single turn has been seen to add, as measured
+   * during this run. Null before a turn-to-turn delta exists.
+   */
+  turnGrowth: number | null
 }
 
 export type ThresholdResult = {
   /** The threshold to actually use. */
   threshold: number
-  /** The highest threshold that could ever be safe here. */
+  /** The point at which the session runs out of usable window. */
   ceiling: number
+  /** Room kept below the ceiling so one more turn cannot overshoot it. */
+  headroom: number
   /** True when the configured value had to be lowered. */
   clamped: boolean
+  /**
+   * True when the clamp rests only on the assumed turn size, so a measurement
+   * may lift it again. Such a clamp is worth applying but not worth alarming
+   * about — on a roomy window the assumption is usually pessimistic.
+   */
+  provisional: boolean
   reason: string | null
 }
 
@@ -47,13 +68,35 @@ export type ThresholdResult = {
  *
  * Both are read from the live session rather than assumed, because they depend
  * on the model and on settings the operator may have changed.
+ *
+ * The ceiling alone is not enough. Usage is only sampled between turns, and one
+ * turn can add fifteen points of window, so a threshold sitting just under the
+ * ceiling gets jumped clean over: the turn that would have triggered the handoff
+ * instead runs out of context. The threshold therefore sits a full turn's growth
+ * below the ceiling, measured from the run itself once there is something to
+ * measure.
  */
 export function effectiveHandoffThreshold(input: ThresholdInput): ThresholdResult {
-  const { configured, maxTokens, maxOutputTokens, autoCompactThreshold, autoCompactEnabled } =
-    input
+  const {
+    configured,
+    maxTokens,
+    maxOutputTokens,
+    autoCompactThreshold,
+    autoCompactEnabled,
+    turnGrowth,
+  } = input
+
+  const headroom = Math.max(HANDOFF_MARGIN, turnGrowth ?? ASSUMED_TURN_GROWTH)
 
   if (!(maxTokens > 0)) {
-    return { threshold: configured, ceiling: 1, clamped: false, reason: null }
+    return {
+      threshold: configured,
+      ceiling: 1,
+      headroom,
+      clamped: false,
+      provisional: false,
+      reason: null,
+    }
   }
 
   const limits: { at: number; because: string }[] = []
@@ -77,24 +120,45 @@ export function effectiveHandoffThreshold(input: ThresholdInput): ThresholdResul
   }
 
   if (limits.length === 0) {
-    return { threshold: configured, ceiling: 1, clamped: false, reason: null }
+    return {
+      threshold: configured,
+      ceiling: 1,
+      headroom,
+      clamped: false,
+      provisional: false,
+      reason: null,
+    }
   }
 
   const binding = limits.reduce((lowest, l) => (l.at < lowest.at ? l : lowest))
-  const ceiling = Math.max(MIN_THRESHOLD, binding.at - HANDOFF_MARGIN)
+  const ceiling = binding.at
+  const safe = Math.max(MIN_THRESHOLD, ceiling - headroom)
 
-  if (configured <= ceiling) {
-    return { threshold: configured, ceiling, clamped: false, reason: null }
+  if (configured <= safe) {
+    return { threshold: configured, ceiling, headroom, clamped: false, provisional: false, reason: null }
   }
 
-  return {
-    threshold: ceiling,
-    ceiling,
-    clamped: true,
-    reason:
-      `handoffThreshold ${(configured * 100).toFixed(0)}% is not reachable: ` +
-      `${binding.because}. Using ${(ceiling * 100).toFixed(0)}% instead.`,
-  }
+  const measured = turnGrowth !== null
+  // Would this have been clamped even without the guess about turn size? If not,
+  // the guess is doing the work and a measurement may well undo it.
+  const provisional = !measured && configured <= ceiling - HANDOFF_MARGIN
+
+  const reason = provisional
+    ? `handoffThreshold ${pct(configured)} may not be reachable: ${binding.because}, ` +
+      `leaving a ${pct(ceiling)} ceiling. Until a turn has been measured, one is assumed ` +
+      `to add ${pct(headroom)} of the window, so the threshold starts at ${pct(safe)} and ` +
+      `rises again if turns turn out smaller.`
+    : `handoffThreshold ${pct(configured)} is not reachable: ${binding.because}, ` +
+      `leaving a ${pct(ceiling)} ceiling, and a single turn ` +
+      `${measured ? 'has been seen to add' : 'is assumed to add'} ${pct(headroom)} of the ` +
+      `window — a threshold nearer the ceiling would be jumped over rather than hit. ` +
+      `Using ${pct(safe)} instead.`
+
+  return { threshold: safe, ceiling, headroom, clamped: true, provisional, reason }
+}
+
+function pct(fraction: number): string {
+  return `${(fraction * 100).toFixed(0)}%`
 }
 
 /**

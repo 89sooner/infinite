@@ -6,6 +6,7 @@
 
 세션의 컨텍스트가 임계값(기본 80%)에 도달하면 자동으로 핸드오프 문서를 쓰게 하고, 세션을
 끝내고, 빈 컨텍스트의 새 세션이 그 문서만 읽고 작업을 이어받습니다. 사람의 개입은 없습니다.
+임계값은 모델의 실제 여유에 맞춰 [자동으로 조정](#임계값-자동-조정)됩니다.
 
 ```
 세션 1  ──80%──▶  핸드오프 작성  ──▶  종료
@@ -115,48 +116,56 @@ node /path/to/infinite/src/cli.ts run --cwd ~/work/my-project --server
 
 ## 실제 실행 예시
 
+두 번의 실제 실행 기록입니다. 첫 번째는 핸드오프 문서의 품질을, 두 번째는 컨텍스트
+임계값이 실제로 발동하는지를 보여줍니다.
+
+---
+
+## 실행 A — 기능 개발 (턴 제한 트리거)
+
 `infinite`를 **이 저장소 자신에게** 붙여, 명령어 세 개(`stats`, `export`, `doctor`)를
-각각 테스트와 함께 구현하라는 미션을 줬습니다. 아래는 그 실행의 실제 기록입니다.
+각각 테스트와 함께 구현하라는 미션을 줬습니다.
 
 ### 결과
 
 ```
-session 1   3 turns   handoff (turns)   context 13% (126,562 / 967,000)   $2.60
-session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
-                                                              합계 4턴, $4.29
+session 1   3 turns   handoff (turns)   context 12% ( 98,979 / 1,000,000)   $2.20
+session 2   1 turn    complete          context 10%                         $1.53
+                                                                합계 4턴, $3.73
 ```
 
-세션 1이 두 개를 구현하고 핸드오프를 남긴 뒤 종료, 세션 2가 **그 문서만 읽고** 나머지
-하나를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 88 → 119개로
+세션 1이 `stats`와 `export`를 구현하고 핸드오프를 남긴 뒤 종료, 세션 2가 **그 문서만 읽고**
+`doctor`를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 133 → 170개로
 전부 통과, `tsc --noEmit` 클린이었습니다.
 
-> **주의**: 이 실행은 80% 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를
-> 유도했습니다(1M 컨텍스트를 80%까지 채우려면 비용이 과합니다). 트리거 사유만
-> `turns`로 다를 뿐 생성되는 문서는 동일합니다. 모델은 `sonnet`.
+> **주의**: 이 실행은 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를 유도했습니다
+> (1M 창을 채우려면 비용이 과합니다). 트리거 사유만 `turns`로 다를 뿐 생성되는 문서는
+> 동일합니다. 모델은 `sonnet`. 컨텍스트로 발동한 실행은 [실행 B](#실행-b--컨텍스트-임계값-트리거)를 보세요.
 
-### 세션 1이 남긴 핸드오프
+### 실행 A의 핸드오프
 
-16,816자, 여섯 섹션의 분량 배분:
+14,767자, 여섯 섹션의 분량 배분:
 
 | 섹션 | 분량 |
 |---|---|
-| STATE | 1,246자 |
-| NEXT STEPS | 6,345자 |
-| FACTS AND DECISIONS | 4,860자 |
-| DEAD ENDS | 2,160자 |
-| OPEN QUESTIONS | 620자 |
-| FILES | 1,446자 |
+| STATE | 1,263자 |
+| NEXT STEPS | 6,076자 |
+| FACTS AND DECISIONS | 4,035자 |
+| DEAD ENDS | 149자 |
+| OPEN QUESTIONS | 1,059자 |
+| FILES | 2,094자 |
 
 아래 인용은 실제 문서에서 가져왔으며, 길이 때문에 일부는 축약했습니다.
 
 **STATE** — VERIFIED와 ASSUMED가 실제로 구분됩니다:
 
 ```markdown
-- VERIFIED: `infinite doctor` (the third and final command) has NOT been started. No
-  `src/doctor.ts` exists, no `doctor` branch in `src/cli.ts`, no `test/doctor.test.ts`.
-- VERIFIED: `npm test` passes 104/104, 0 failures (ran it after both completed commands).
-- ASSUMED (not re-verified this leg, but true as of last check): the repo has no `.git`
-  — `git status`/commits are not part of this workflow, do not attempt them.
+- VERIFIED: `infinite stats` is fully implemented — `src/stats.ts` (pure `computeStats`/
+  `formatStats`), wired into `src/cli.ts` (USAGE line + `if (command === 'stats')` block),
+  tests in `test/stats.test.ts` plus two cases appended to `test/cli.test.ts`.
+- VERIFIED: `npm run typecheck` is clean and `npm test` passes 151/151 as of the end of
+  this session (ran both after implementing `export`).
+- VERIFIED: `infinite doctor` (the third and final command) has NOT been started.
 ```
 
 **NEXT STEPS** — 파일과 줄 번호를 짚고, 설계 선택지를 근거와 함께 남깁니다:
@@ -171,49 +180,147 @@ session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
   existing error messages already ARE the specific remedies. Do not duplicate that logic.
 ```
 
-**DEAD ENDS** — 다음 세션이 같은 실패를 반복하지 않게 하는 부분입니다:
+**DEAD ENDS** — 이번 실행에서는 비었습니다. 그게 결과입니다:
 
 ```markdown
-- Tried using `sed -n`, `awk`, and inline `python3 -c` via Bash — all blocked by this
-  environment's tool policy. Workaround that DOES work: `grep -oP ... | wc -c`, or just
-  Read the file. Expect this same restriction to apply to doctor work — don't waste turns
-  retrying sed/awk/python one-liners.
-- Tried chaining `cd <dir> && node ... && cat ...` in one Bash call — blocked outright.
-  One command per Bash call, absolute paths, no `&&` chaining, no `cd`.
+- None encountered this session. Both `stats` and `export` went in cleanly on the first
+  attempt; no failed approaches worth recording.
 ```
 
 **FILES** — 무엇이 끝났고 무엇이 남았는지 파일 단위로:
 
 ```markdown
-- `src/stats.ts` — new. Pure `computeStats`/`formatStats`. Complete, tested, do not revisit.
-- `src/cli.ts` — modified. Added imports, two USAGE lines, two `if (command === ...)` blocks,
-  and a `readMissionText()` helper. No existing command logic changed. NEXT: needs a third
-  USAGE line + `if (command === 'doctor')` block.
-- `README.md` — NOT modified yet (CLI docs at ~line 156-176 are now stale). Deferred.
+- `src/stats.ts` — new, complete. Pure `computeStats`/`formatStats`. Do not revisit
+  unless a bug is found.
+- `src/cli.ts` — modified. Added imports, two new `USAGE` lines (stats, export), two new
+  `if (command === ...)` blocks, and a `readMissionForExport()` helper. No existing
+  command logic (`run`, `status`, `init`, `handoff`, `notify-test`, `notify`) was touched.
+  NEXT: needs a third `USAGE` line for `doctor` and an `if (command === 'doctor')` block.
 ```
 
-### 효과 측정
+### DEAD ENDS가 도구의 결함을 신고했다
 
-`DEAD ENDS`가 실제로 작동했는지 이벤트 로그로 확인했습니다.
+이 미션은 두 번 돌렸습니다. **처음 실행에서는 `DEAD ENDS`가 2,160자였고**, 내용은 전부
+도구 정책과의 싸움이었습니다.
+
+```markdown
+- Tried using `sed -n`, `awk`, and inline `python3 -c` via Bash — all blocked by this
+  environment's tool policy. Expect this same restriction to apply to doctor work —
+  don't waste turns retrying sed/awk/python one-liners.
+- Tried chaining `cd <dir> && node ... && cat ...` in one Bash call — blocked outright.
+```
+
+이건 **정상 동작이 아니라 버그였습니다.** 파고들어 보니 `denyBash`의 `"rm -rf /"`가 단순
+부분 문자열 매칭이라 `rm -rf /tmp/scratch/build`까지 막고 있었고, 따옴표 안의 `;`로 명령을
+분해하는 바람에 `python3 -c "..."`가 통째로 거부됐으며, `mkfs.ext4`는 오히려 그냥 통과하고
+있었습니다. 전부 수정했습니다 ([보안](#보안) 참조).
+
+정책을 고친 뒤 **같은 미션을 다시 돌린 것이 위의 기록**입니다. 이벤트 로그로 대조하면:
 
 | | 도구 호출 | 정책에 거부됨 |
 |---|---|---|
-| 세션 1 (맨땅에서 시작) | 32회 | **5회** |
-| 세션 2 (핸드오프 읽고 시작) | 19회 | **1회** |
+| 수정 전 · 세션 1 | 32회 | 5회 |
+| 수정 전 · 세션 2 (핸드오프 읽음) | 19회 | 1회 |
+| **수정 후 · 세션 1** | 23회 | **0회** |
+| **수정 후 · 세션 2** | 25회 | **0회** |
 
-세션 2는 같은 벽에 다시 부딪히지 않았습니다.
-
-### 부수 효과: 핸드오프가 도구의 결함을 신고했다
-
-위 `DEAD ENDS`에 적힌 제약들은 사실 **정상 동작이 아니라 버그였습니다.** 파고들어 보니
-`denyBash`의 `"rm -rf /"`가 단순 부분 문자열 매칭이라 `rm -rf /tmp/scratch/build`까지
-막고 있었고, 따옴표 안의 `;`로 명령을 분해하는 바람에 `python3 -c "..."`가 통째로
-거부됐으며, `mkfs.ext4`는 오히려 그냥 통과하고 있었습니다. 전부 수정했습니다
-([보안](#보안) 참조).
+거부가 사라지자 `DEAD ENDS`도 2,160자에서 149자("없음")로 줄었습니다. 섹션이 비는 것이
+좋은 신호입니다 — 기록할 실패가 없었다는 뜻이니까요.
 
 에이전트가 무엇과 싸웠는지가 문서에 남으므로, `DEAD ENDS`는 다음 세션을 위한 메모인
 동시에 **운영자가 정책과 미션 문구에서 고칠 곳을 찾는 단서**이기도 합니다. 주기적으로
 훑어볼 가치가 있습니다.
+
+---
+
+## 실행 B — 컨텍스트 임계값 트리거
+
+턴 제한을 끄고(`maxTurnsPerLeg: 0`) **컨텍스트만이 유일한 트리거**가 되게 한 실행입니다.
+미션은 벤더링된 Agent SDK 타입 정의(`sdk.d.ts` 238개 + `sdk-tools.d.ts` 87개, 합 325개
+심볼)를 항목당 110단어 이상으로 문서화하는 것 — 한 세션에 끝날 수 없는 분량입니다.
+
+```
+모델        claude-haiku-4-5   (컨텍스트 창 200,000)
+설정        handoffThreshold: 0.8,  maxTurnsPerLeg: 0
+완료 판정   verify.ts 가 RESULT: DONE 를 출력해야만 COMPLETE 가능
+```
+
+### 결과
+
+```
+session 1   turn 1   73%   →  핸드오프 발동 (context)
+            turn 2   74%   →  문서 5,001자                        $1.62
+session 2   turn 1   68%
+            turn 2   78%   →  핸드오프 발동 (context)
+            turn 3   79%   →  문서 5,484자                        $2.43
+                                                     합계 5턴, $4.05
+```
+
+두 세션 모두 **컨텍스트 사유로** 핸드오프했습니다. auto-compact가 꺼져 있어 리셋 없이
+단조 증가했고, 문서 작성 턴이 천장(84%) 아래에 안전하게 머물렀습니다.
+
+시작 시 임계값이 자동으로 조정된 것이 로그에 남습니다.
+
+```
+[context] handoffThreshold 80% is not reachable: the model reserves 32,000 tokens
+          of the 200,000-token window for its own output, leaving a 84% ceiling,
+          and a single turn has been seen to add 15% of the window — a threshold
+          nearer the ceiling would be jumped over rather than hit.
+          Using 69% instead.
+```
+
+> **200k 창에서 80%는 안전하게 도달할 수 없습니다.** 출력 예약 16%p와 턴 증가폭 15%p를
+> 빼면 실질 상한이 69%입니다. 도구가 이를 계산해 알려주고 도달 가능한 값으로 낮춥니다.
+> 1M 창에서는 천장이 93%라 설정값 80%가 그대로 통과합니다.
+
+### 연속성 검증
+
+세션 2가 남긴 핸드오프의 수치를 `verify.ts` 실측과 대조했습니다.
+
+| | 세션 1 종료 시 | 세션 2 종료 시 | 실측 |
+|---|---|---|---|
+| TOOLS 미달 항목 | 44개 | **0개 (완료)** | ✅ 0 |
+| SDK 미달 항목 | 213개 | **203개** | ✅ 203 |
+
+세션 2는 세션 1이 `NEXT STEPS`에 남긴 우선순위 — *"TOOLS를 먼저, 항목 수가 적어 빨리
+끝난다"* — 를 그대로 따라 TOOLS를 100% 완료하고 SDK로 넘어갔습니다. 문서의 모든 숫자가
+실측과 일치합니다.
+
+### 세션 간에 질문과 답이 이어졌다
+
+세션 1이 `OPEN QUESTIONS`에 자기 컨텍스트 예산을 계산해 남겼습니다.
+
+```markdown
+1. Fast completion estimate: With current expansion rate (18 entries in 137k tokens
+   = 7,600 tokens per entry), can remaining 293 entries be done in ~120k tokens?
+   - Resolution: Session 2 will track token usage and adjust batch sizes if needed
+```
+
+세션 2가 실측으로 답을 갱신했습니다.
+
+```markdown
+- Efficiency rate: ~1-1.5k tokens per entry (proven repeatable)
+```
+
+프롬프트로 요구한 적 없는 항목입니다. 에이전트가 자기 예산을 인식하고 다음 세션에 넘긴
+것이고, 다음 세션이 그 질문에 답했습니다.
+
+### 이 실행들이 찾아낸 결함
+
+여기까지 오는 데 여러 번의 실패가 있었고, 전부 도구의 결함이었습니다.
+
+| 증상 | 원인 | 수정 |
+|---|---|---|
+| 16턴 동안 80%에 못 닿음, compact가 5번 리셋 | `disableAutoCompact` 기본값이 `false` | 기본값을 `true`로 |
+| 79%까지 갔다가 컨텍스트 초과로 세션 실패 | 여유분 3%p가 턴 증가폭(15%p)보다 작음 | 천장에서 턴 하나만큼 아래로 |
+| `turn failed: success` 라는 로그 | `is_error`가 참인데 `subtype`만 출력 | 진단 필드 전부 출력 |
+| 1M 창에서 "80%는 도달 불가능" 경고 후 조용히 80%로 복귀 | 측정 전 가정값(15%p)만으로 경고 | 가정에 기반한 클램프는 debug로 강등 |
+
+앞의 셋은 짧은 데모로는 하나도 잡히지 않았습니다. 66%를 넘겨본 적이 없었기 때문입니다.
+마지막 하나는 세 번째 수정이 만든 것이고, **실행 A를 새 코드로 다시 돌려서** 잡혔습니다 —
+넉넉한 창에서는 그 가정이 과하게 비관적이라 오보가 됩니다.
+
+**장기 실행과 재실행만이 드러낼 수 있는 문제들이었습니다.**
 
 ---
 
@@ -238,7 +345,7 @@ INFINITE_STATUS: BLOCKED: <이유>        # 사람의 판단 필요
 | 키 | 기본값 | 설명 |
 |---|---|---|
 | `missionFile` | `MISSION.md` | 미션 파일 경로 |
-| `handoffThreshold` | `0.8` | 핸드오프를 트리거하는 컨텍스트 비율 (0-1). 0.92 초과는 거부됩니다 |
+| `handoffThreshold` | `0.8` | 핸드오프를 트리거하는 컨텍스트 비율 (0-1). 0.92 초과는 거부되고, 도달 불가능하면 자동으로 낮아집니다 ([임계값 자동 조정](#임계값-자동-조정)) |
 | `maxLegs` | `0` | 최대 세션 수. 0은 무제한 |
 | `maxTurnsPerLeg` | `0` | 이 턴 수에 도달하면 컨텍스트와 무관하게 핸드오프. 0은 비활성 |
 | `maxCostUsdPerLeg` | `0` | 세션당 지출 상한 도달 시 핸드오프. 0은 비활성 |
@@ -582,16 +689,26 @@ turn 10   27%   ← 다시 밑바닥
 | 출력 예약 | `1 − maxOutputTokens / maxTokens` — 모델이 자기 출력용으로 잡아둔 몫 |
 | 자동 압축 | `autoCompactThreshold / maxTokens` — compact를 켜둔 경우에만 |
 
-둘 중 낮은 쪽에서 여유분(3%p)을 뺀 값이 상한이고, 설정값이 그보다 높으면 낮추면서 이유를
-로그에 남깁니다.
+둘 중 낮은 쪽이 **천장**입니다. 그리고 임계값은 천장 바로 밑이 아니라 **턴 하나만큼
+아래**에 놓입니다.
+
+컨텍스트는 턴 경계에서만 측정되는데 턴 하나가 15%p씩 밀어 올립니다. 천장 84%에 임계값
+80%를 두면 79%로 끝난 턴 다음에 검사할 기회 없이 한계를 넘어갑니다 — 임계값에 **닿는**
+게 아니라 **뛰어넘습니다**. 실측에서 정확히 이렇게 터졌습니다.
+
+턴 증가폭은 실행 중에 측정합니다(측정 전에는 15%p로 가정). 워크로드마다 다른 값이라
+가정할 수 없습니다. 설정값이 `천장 − 턴 증가폭`보다 높으면 낮추면서 이유를 로그에 남깁니다.
 
 ```
-handoffThreshold 95% is not reachable: the model reserves 32,000 tokens of the
-200,000-token window for its own output. Using 81% instead.
+handoffThreshold 80% is not reachable: the model reserves 32,000 tokens of the
+200,000-token window for its own output, leaving a 84% ceiling, and a single turn
+has been seen to add 15% of the window — a threshold nearer the ceiling would be
+jumped over rather than hit. Using 69% instead.
 ```
 
-두 값 모두 세션에서 실시간으로 읽습니다 — 모델과 설정에 따라 달라지므로 가정할 수 없습니다.
-200k 창 모델은 출력 예약만으로 상한이 81%까지 내려가고, 1M 창에서는 90%라 보통 걸리지 않습니다.
+모든 값을 세션에서 실시간으로 읽습니다. **200k 창 모델에서 80%는 안전하게 도달할 수
+없습니다** — 출력 예약 16%p와 턴 증가폭 15%p를 빼면 실질 상한이 69%입니다. 1M 창에서는
+천장이 93%이고 턴 증가폭도 비례해서 작아지므로 80%가 그대로 통과합니다.
 
 ### 상태 파일
 
@@ -627,9 +744,10 @@ GitHub Actions에서 push(main)와 모든 PR에 대해 같은 두 명령이 돌�
 
 - **핸드오프는 손실 압축입니다.** 문서에 없는 것은 사라집니다. 미션의 `Constraints`가
   중요한 이유입니다 — 그것만은 매번 원문으로 다시 들어갑니다.
-- **임계값 검사는 턴 경계에서만 돕니다.** 한 턴이 임계값을 크게 뛰어넘으면 그 지점을
-  지나친 뒤에야 핸드오프가 발동합니다. 상한에서 3%p를 빼두는 이유이고, compact를
-  기본으로 끄는 이유이기도 합니다.
+- **임계값 검사는 턴 경계에서만 돕니다.** 턴 하나가 컨텍스트를 크게 밀어 올리므로
+  임계값은 천장에서 턴 증가폭만큼 내려 잡습니다. 그래도 평소보다 훨씬 큰 턴 하나가
+  천장을 넘기면 세션이 컨텍스트 초과로 실패하고, **그 세션의 작업은 핸드오프 없이
+  유실됩니다.** 다음 세션은 직전 핸드오프에서 다시 시작합니다.
 - **에이전트가 스스로 `COMPLETE`를 선언하면 컨텍스트와 무관하게 세션이 끝납니다.**
   미션의 완료 조건을 검증 가능하게 써야 하는 실질적인 이유입니다 — 근거 없는 완료 선언을
   막는 것은 미션 문구뿐입니다.
