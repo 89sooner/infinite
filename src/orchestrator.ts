@@ -20,6 +20,7 @@ import {
 } from './handoff.ts'
 import { buildPermissionHandler } from './policy.ts'
 import { Notifier } from './notify/notifier.ts'
+import { effectiveHandoffThreshold, pickMaxOutputTokens } from './threshold.ts'
 
 /**
  * A push-driven async iterable of user messages. The SDK consumes it for the
@@ -88,11 +89,17 @@ export class Orchestrator {
   private stopRequested = false
   private pauseRequested = false
   private activeQuery: Query | null = null
+  /** Output budget of the running model, learned from the first result. */
+  private maxOutputTokens: number | null = null
+  /** The configured threshold after clamping to what this session can reach. */
+  private threshold: number
+  private thresholdReported = false
   readonly notifier: Notifier
 
   constructor(cfg: InfiniteConfig, store: Store) {
     this.cfg = cfg
     this.store = store
+    this.threshold = cfg.handoffThreshold
     this.notifier = new Notifier(cfg, store)
   }
 
@@ -345,6 +352,9 @@ export class Orchestrator {
         const resultText = 'result' in result ? result.result : ''
         if (resultText) lastText = resultText
 
+        this.maxOutputTokens =
+          pickMaxOutputTokens(result.modelUsage, this.cfg.model) ?? this.maxOutputTokens
+
         this.store.update((s) => {
           s.totalTurns += 1
         })
@@ -552,11 +562,30 @@ export class Orchestrator {
     // a future version reports a fraction instead.
     const pct = raw.percentage > 1 ? raw.percentage / 100 : raw.percentage
 
+    // The reachable threshold depends on the model's output budget and on
+    // whether Claude Code compacts on its own, neither of which is known until a
+    // session is live.
+    const resolved = effectiveHandoffThreshold({
+      configured: this.cfg.handoffThreshold,
+      maxTokens: raw.maxTokens,
+      maxOutputTokens: this.maxOutputTokens,
+      autoCompactThreshold: raw.autoCompactThreshold ?? null,
+      autoCompactEnabled: raw.isAutoCompactEnabled,
+    })
+    this.threshold = resolved.threshold
+
+    if (resolved.clamped && !this.thresholdReported) {
+      this.thresholdReported = true
+      this.store.warn('context', resolved.reason ?? 'handoff threshold clamped')
+    }
+
     const snapshot: ContextSnapshot = {
       tokens: raw.totalTokens,
       maxTokens: raw.maxTokens,
       pct,
       model: raw.model,
+      maxOutputTokens: this.maxOutputTokens,
+      effectiveThreshold: resolved.threshold,
       autoCompactThreshold: raw.autoCompactThreshold ?? null,
       autoCompactEnabled: raw.isAutoCompactEnabled,
       categories: raw.categories.map((c) => ({ name: c.name, tokens: c.tokens })),
@@ -571,7 +600,7 @@ export class Orchestrator {
 
   private handoffTrigger(leg: Leg, usage: ContextSnapshot | null): HandoffReason | null {
     if (this.store.state.handoffRequested) return 'operator'
-    if (usage && usage.pct >= this.cfg.handoffThreshold) return 'context'
+    if (usage && usage.pct >= this.threshold) return 'context'
     if (this.cfg.maxTurnsPerLeg > 0 && leg.turns >= this.cfg.maxTurnsPerLeg) return 'turns'
     if (this.cfg.maxCostUsdPerLeg > 0 && leg.costUsd >= this.cfg.maxCostUsdPerLeg) return 'cost'
     return null

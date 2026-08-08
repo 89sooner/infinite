@@ -248,7 +248,7 @@ INFINITE_STATUS: BLOCKED: <이유>        # 사람의 판단 필요
 | `effort` | `null` | `low`/`medium`/`high`/`xhigh`/`max` |
 | `permissionMode` | `"default"` | `default`면 아래 도구 정책을 사용 |
 | `toolPolicy` | 내장 허용목록 | 무인 실행용 도구 승인 규칙 |
-| `disableAutoCompact` | `false` | Claude Code 자체 compact 비활성화 |
+| `disableAutoCompact` | `true` | Claude Code 자체 compact 비활성화. 기본값 켜짐 — [왜](#왜-compact를-끄는가) |
 | `stopOnBlocked` | `false` | `BLOCKED` 보고 시 실행 중단 |
 | `idleNudge` | 내장 문구 | 큐가 비었을 때 보낼 메시지 |
 | `server` | `{...}` | 대시보드 설정 |
@@ -275,7 +275,7 @@ infinite notify <on|off>   알림 허용 / 음소거
   --server               대시보드 실행
   --port / --host        대시보드 바인딩
   --bypass-permissions   도구 정책 대신 모든 도구 승인
-  --no-auto-compact      Claude Code 자체 compact 비활성화
+  --auto-compact         Claude Code 자체 compact 다시 켜기 (기본은 꺼짐)
   --quiet                stdout 로그 억제
 ```
 
@@ -552,8 +552,46 @@ totalTokens / maxTokens ≥ handoffThreshold  →  핸드오프 프롬프트 주
 4. 문서를 `.infinite/handoffs/`에 저장, 한 줄 요약 추출
 5. 새 세션에서 반복
 
-`disableAutoCompact`를 켜지 않으면 Claude Code의 compact가 안전망으로 남습니다.
-compact가 임계값보다 먼저 발동하면 경고를 남기므로 로그에서 바로 확인할 수 있습니다.
+### 왜 compact를 끄는가
+
+`disableAutoCompact`는 **기본값이 `true`** 입니다. 실제 장기 실행에서 이게 꺼져 있으면
+핸드오프가 아예 발동하지 않는 것을 확인했기 때문입니다.
+
+임계값 검사는 **턴 경계**에서 돌고, Claude Code의 compact는 **턴 도중**에 걸립니다.
+파일을 여러 조각 읽는 턴은 한 번에 20%p씩 컨텍스트를 밀어 올리므로, 64%에서 시작한 턴이
+검사받을 기회도 없이 compact 지점을 지나쳐버립니다. 실측 결과 16턴 동안 compact가 다섯 번
+발동해 컨텍스트가 매번 리셋됐고, 80%에는 한 번도 닿지 못했습니다.
+
+```
+turn  1   64%   >>> AUTO-COMPACT (리셋)
+turn  5   71%   >>> AUTO-COMPACT (리셋)
+turn  9   71%   >>> AUTO-COMPACT (리셋)
+turn 10   27%   ← 다시 밑바닥
+```
+
+컨텍스트 관리자가 둘이면 턴 도중에 발동하는 쪽이 항상 이깁니다. `infinite`가 관리자를
+맡는 이상 다른 하나는 꺼야 합니다. compact를 안전망으로 남기고 싶으면 `--auto-compact`로
+되돌릴 수 있지만, 핸드오프가 선점당할 수 있다는 뜻입니다.
+
+### 임계값 자동 조정
+
+설정한 임계값이 항상 도달 가능한 것은 아닙니다. 두 가지가 그 아래에 깔릴 수 있습니다.
+
+| 상한 | 계산 |
+|---|---|
+| 출력 예약 | `1 − maxOutputTokens / maxTokens` — 모델이 자기 출력용으로 잡아둔 몫 |
+| 자동 압축 | `autoCompactThreshold / maxTokens` — compact를 켜둔 경우에만 |
+
+둘 중 낮은 쪽에서 여유분(3%p)을 뺀 값이 상한이고, 설정값이 그보다 높으면 낮추면서 이유를
+로그에 남깁니다.
+
+```
+handoffThreshold 95% is not reachable: the model reserves 32,000 tokens of the
+200,000-token window for its own output. Using 81% instead.
+```
+
+두 값 모두 세션에서 실시간으로 읽습니다 — 모델과 설정에 따라 달라지므로 가정할 수 없습니다.
+200k 창 모델은 출력 예약만으로 상한이 81%까지 내려가고, 1M 창에서는 90%라 보통 걸리지 않습니다.
 
 ### 상태 파일
 
@@ -589,8 +627,12 @@ GitHub Actions에서 push(main)와 모든 PR에 대해 같은 두 명령이 돌�
 
 - **핸드오프는 손실 압축입니다.** 문서에 없는 것은 사라집니다. 미션의 `Constraints`가
   중요한 이유입니다 — 그것만은 매번 원문으로 다시 들어갑니다.
-- **컨텍스트를 즉시 100% 채우는 단일 도구 호출**은 임계값 검사를 건너뛸 수 있습니다.
-  이 경우 Claude Code의 auto-compact가 안전망으로 동작합니다.
+- **임계값 검사는 턴 경계에서만 돕니다.** 한 턴이 임계값을 크게 뛰어넘으면 그 지점을
+  지나친 뒤에야 핸드오프가 발동합니다. 상한에서 3%p를 빼두는 이유이고, compact를
+  기본으로 끄는 이유이기도 합니다.
+- **에이전트가 스스로 `COMPLETE`를 선언하면 컨텍스트와 무관하게 세션이 끝납니다.**
+  미션의 완료 조건을 검증 가능하게 써야 하는 실질적인 이유입니다 — 근거 없는 완료 선언을
+  막는 것은 미션 문구뿐입니다.
 - **연속 2회 세션 실패 시 실행이 중단됩니다** — 일시적 오류가 아니라 구조적 문제로 보고
   무한 재시도 루프를 막습니다.
 - 컨텍스트를 읽지 못한 턴은 임계값 검사를 건너뜁니다(경고가 기록됩니다).

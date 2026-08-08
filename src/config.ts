@@ -212,7 +212,12 @@ function defaults(cwd: string): InfiniteConfig {
     disallowedTools: null,
     additionalDirectories: [],
 
-    disableAutoCompact: false,
+    // On by default. Claude Code's own compaction fires mid-turn, so on a real
+    // long run it beats the handoff threshold — which is checked between turns —
+    // and the run degrades into exactly the repeated in-session summarisation
+    // this tool exists to replace. infinite manages the context; leaving a
+    // second manager running underneath it means neither is in charge.
+    disableAutoCompact: true,
 
     idleNudge: DEFAULT_IDLE_NUDGE,
     stopOnBlocked: false,
