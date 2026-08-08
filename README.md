@@ -6,6 +6,7 @@
 
 세션의 컨텍스트가 임계값(기본 80%)에 도달하면 자동으로 핸드오프 문서를 쓰게 하고, 세션을
 끝내고, 빈 컨텍스트의 새 세션이 그 문서만 읽고 작업을 이어받습니다. 사람의 개입은 없습니다.
+임계값은 모델의 실제 여유에 맞춰 [자동으로 조정](#임계값-자동-조정)됩니다.
 
 ```
 세션 1  ──80%──▶  핸드오프 작성  ──▶  종료
@@ -115,8 +116,15 @@ node /path/to/infinite/src/cli.ts run --cwd ~/work/my-project --server
 
 ## 실제 실행 예시
 
+두 번의 실제 실행 기록입니다. 첫 번째는 핸드오프 문서의 품질을, 두 번째는 컨텍스트
+임계값이 실제로 발동하는지를 보여줍니다.
+
+---
+
+## 실행 A — 기능 개발 (턴 제한 트리거)
+
 `infinite`를 **이 저장소 자신에게** 붙여, 명령어 세 개(`stats`, `export`, `doctor`)를
-각각 테스트와 함께 구현하라는 미션을 줬습니다. 아래는 그 실행의 실제 기록입니다.
+각각 테스트와 함께 구현하라는 미션을 줬습니다.
 
 ### 결과
 
@@ -130,11 +138,11 @@ session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
 하나를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 88 → 119개로
 전부 통과, `tsc --noEmit` 클린이었습니다.
 
-> **주의**: 이 실행은 80% 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를
-> 유도했습니다(1M 컨텍스트를 80%까지 채우려면 비용이 과합니다). 트리거 사유만
-> `turns`로 다를 뿐 생성되는 문서는 동일합니다. 모델은 `sonnet`.
+> **주의**: 이 실행은 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를 유도했습니다
+> (1M 창을 채우려면 비용이 과합니다). 트리거 사유만 `turns`로 다를 뿐 생성되는 문서는
+> 동일합니다. 모델은 `sonnet`. 컨텍스트로 발동한 실행은 [실행 B](#실행-b--컨텍스트-임계값-트리거)를 보세요.
 
-### 세션 1이 남긴 핸드오프
+### 실행 A의 핸드오프
 
 16,816자, 여섯 섹션의 분량 배분:
 
@@ -217,6 +225,93 @@ session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
 
 ---
 
+## 실행 B — 컨텍스트 임계값 트리거
+
+턴 제한을 끄고(`maxTurnsPerLeg: 0`) **컨텍스트만이 유일한 트리거**가 되게 한 실행입니다.
+미션은 벤더링된 Agent SDK 타입 정의(`sdk.d.ts` 238개 + `sdk-tools.d.ts` 87개, 합 325개
+심볼)를 항목당 110단어 이상으로 문서화하는 것 — 한 세션에 끝날 수 없는 분량입니다.
+
+```
+모델        claude-haiku-4-5   (컨텍스트 창 200,000)
+설정        handoffThreshold: 0.8,  maxTurnsPerLeg: 0
+완료 판정   verify.ts 가 RESULT: DONE 를 출력해야만 COMPLETE 가능
+```
+
+### 결과
+
+```
+session 1   turn 1   73%   →  핸드오프 발동 (context)
+            turn 2   74%   →  문서 5,001자                        $1.62
+session 2   turn 1   68%
+            turn 2   78%   →  핸드오프 발동 (context)
+            turn 3   79%   →  문서 5,484자                        $2.43
+                                                     합계 5턴, $4.05
+```
+
+두 세션 모두 **컨텍스트 사유로** 핸드오프했습니다. auto-compact가 꺼져 있어 리셋 없이
+단조 증가했고, 문서 작성 턴이 천장(84%) 아래에 안전하게 머물렀습니다.
+
+시작 시 임계값이 자동으로 조정된 것이 로그에 남습니다.
+
+```
+[context] handoffThreshold 80% is not reachable: the model reserves 32,000 tokens
+          of the 200,000-token window for its own output, leaving a 84% ceiling,
+          and a single turn has been seen to add 15% of the window — a threshold
+          nearer the ceiling would be jumped over rather than hit.
+          Using 69% instead.
+```
+
+> **200k 창에서 80%는 안전하게 도달할 수 없습니다.** 출력 예약 16%p와 턴 증가폭 15%p를
+> 빼면 실질 상한이 69%입니다. 도구가 이를 계산해 알려주고 도달 가능한 값으로 낮춥니다.
+> 1M 창에서는 천장이 93%라 설정값 80%가 그대로 통과합니다.
+
+### 연속성 검증
+
+세션 2가 남긴 핸드오프의 수치를 `verify.ts` 실측과 대조했습니다.
+
+| | 세션 1 종료 시 | 세션 2 종료 시 | 실측 |
+|---|---|---|---|
+| TOOLS 미달 항목 | 44개 | **0개 (완료)** | ✅ 0 |
+| SDK 미달 항목 | 213개 | **203개** | ✅ 203 |
+
+세션 2는 세션 1이 `NEXT STEPS`에 남긴 우선순위 — *"TOOLS를 먼저, 항목 수가 적어 빨리
+끝난다"* — 를 그대로 따라 TOOLS를 100% 완료하고 SDK로 넘어갔습니다. 문서의 모든 숫자가
+실측과 일치합니다.
+
+### 세션 간에 질문과 답이 이어졌다
+
+세션 1이 `OPEN QUESTIONS`에 자기 컨텍스트 예산을 계산해 남겼습니다.
+
+```markdown
+1. Fast completion estimate: With current expansion rate (18 entries in 137k tokens
+   = 7,600 tokens per entry), can remaining 293 entries be done in ~120k tokens?
+   - Resolution: Session 2 will track token usage and adjust batch sizes if needed
+```
+
+세션 2가 실측으로 답을 갱신했습니다.
+
+```markdown
+- Efficiency rate: ~1-1.5k tokens per entry (proven repeatable)
+```
+
+프롬프트로 요구한 적 없는 항목입니다. 에이전트가 자기 예산을 인식하고 다음 세션에 넘긴
+것이고, 다음 세션이 그 질문에 답했습니다.
+
+### 이 실행이 찾아낸 결함
+
+여기까지 오는 데 네 번의 실패가 있었고, 전부 도구의 결함이었습니다.
+
+| 증상 | 원인 | 수정 |
+|---|---|---|
+| 16턴 동안 80%에 못 닿음, compact가 5번 리셋 | `disableAutoCompact` 기본값이 `false` | 기본값을 `true`로 |
+| 79%까지 갔다가 컨텍스트 초과로 세션 실패 | 여유분 3%p가 턴 증가폭(15%p)보다 작음 | 천장에서 턴 하나만큼 아래로 |
+| `turn failed: success` 라는 로그 | `is_error`가 참인데 `subtype`만 출력 | 진단 필드 전부 출력 |
+
+짧은 데모로는 하나도 잡히지 않았습니다. 66%를 넘겨본 적이 없었기 때문입니다.
+**장기 실행만이 드러낼 수 있는 문제들이었습니다.**
+
+---
+
 ## 세션 프로토콜
 
 에이전트는 매 응답을 상태 줄로 끝냅니다.
@@ -238,7 +333,7 @@ INFINITE_STATUS: BLOCKED: <이유>        # 사람의 판단 필요
 | 키 | 기본값 | 설명 |
 |---|---|---|
 | `missionFile` | `MISSION.md` | 미션 파일 경로 |
-| `handoffThreshold` | `0.8` | 핸드오프를 트리거하는 컨텍스트 비율 (0-1). 0.92 초과는 거부됩니다 |
+| `handoffThreshold` | `0.8` | 핸드오프를 트리거하는 컨텍스트 비율 (0-1). 0.92 초과는 거부되고, 도달 불가능하면 자동으로 낮아집니다 ([임계값 자동 조정](#임계값-자동-조정)) |
 | `maxLegs` | `0` | 최대 세션 수. 0은 무제한 |
 | `maxTurnsPerLeg` | `0` | 이 턴 수에 도달하면 컨텍스트와 무관하게 핸드오프. 0은 비활성 |
 | `maxCostUsdPerLeg` | `0` | 세션당 지출 상한 도달 시 핸드오프. 0은 비활성 |
