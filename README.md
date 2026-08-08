@@ -612,33 +612,34 @@ curl -X POST $HOST/api/notifications -H 'Content-Type: application/json' \
 
 ## 서버 운영
 
-```ini
-# /etc/systemd/system/infinite.service
-[Unit]
-Description=infinite — relayed Claude Code agent
-After=network-online.target
+systemd 유닛과 설치 스크립트가 `deploy/`에 있습니다. 프로젝트마다 인스턴스를 하나씩 띄우는
+템플릿 유닛 방식입니다.
 
-[Service]
-Type=simple
-User=infinite
-WorkingDirectory=/srv/projects/my-project
-Environment=INFINITE_TOKEN=change-me
-# 메신저 자격 증명은 설정 파일이 아니라 여기에 (또는 EnvironmentFile=)
-Environment=KNOX_TOKEN=...
-ExecStart=/usr/bin/node /opt/infinite/src/cli.ts run --server --host 127.0.0.1
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo deploy/install.sh --dry-run --project acme-api   # 계획만 출력, 변경 없음
+sudo deploy/install.sh --project acme-api             # 설치
+sudo systemctl enable --now infinite@acme-api
+journalctl -u infinite@acme-api -f
 ```
 
-`SIGTERM`/`SIGINT`은 현재 턴이 끝난 뒤 정상 종료합니다(한 번 더 보내면 강제 종료).
-상태는 `.infinite/state.json`에 원자적으로 저장되므로 재시작하면 마지막 세션 다음부터 이어집니다.
+설치 스크립트는 Node 버전을 검사하고, 전용 비특권 계정을 만들고, 코드와 의존성을 넣고,
+`/etc/infinite/`에 env 파일을 만들고, 유닛을 렌더링해 설치합니다. **시작은 하지 않습니다** —
+미션과 도구 정책을 검토한 뒤 직접 켜야 합니다.
 
-**비용 주의:** 세션을 갈아엎을 때마다 프롬프트 캐시가 무효화되어 새 세션의 첫 턴이
-비쌉니다(대략 3~4만 토큰의 캐시 생성). 임계값을 너무 낮게 잡으면 이 비용이 누적됩니다.
-`maxCostUsdTotal`로 상한을 걸어두세요.
+전체 배포 가이드는 **[deploy/README.md](deploy/README.md)** 를 보세요. 인증, 여러 프로젝트
+운영, 업그레이드, 유닛에 적용된 보안 설정, 비용을 다룹니다.
+
+몇 가지 알아둘 점:
+
+- **`SIGTERM`은 현재 턴이 끝난 뒤** 반영됩니다. 유닛의 `TimeoutStopSec=900`을 줄이면
+  systemd가 턴 중간에 `SIGKILL`을 보내고 그 턴의 작업이 핸드오프 없이 사라집니다.
+- **미션이 `COMPLETE`로 끝나면 유닛은 멈춘 채로 남습니다.** `Restart=on-failure`라
+  정상 종료는 재시작하지 않습니다.
+- 상태는 `.infinite/state.json`에 원자적으로 저장되므로 재시작하면 마지막 세션 다음부터
+  이어집니다.
+- **비용 주의:** 세션을 갈아엎을 때마다 프롬프트 캐시가 무효화되어 새 세션의 첫 턴이
+  비쌉니다(대략 3~4만 토큰의 캐시 생성). 실측으로 4턴 실행이 sonnet에서 약 $3.7이었습니다.
+  `maxCostUsdTotal`이 무인 실행의 유일한 지출 상한입니다 — 반드시 걸어두세요.
 
 ---
 
