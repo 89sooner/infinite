@@ -41,6 +41,10 @@ export type ContextSnapshot = {
   maxTokens: number
   pct: number
   model: string
+  /** Output budget reserved inside the same window; shrinks the usable share. */
+  maxOutputTokens: number | null
+  /** The configured threshold after clamping to what this session can reach. */
+  effectiveThreshold: number
   /** Claude Code's own auto-compact threshold, for reference. */
   autoCompactThreshold: number | null
   autoCompactEnabled: boolean
@@ -146,7 +150,10 @@ export type InfiniteConfig = {
 
   /**
    * Turn off Claude Code's own auto-compaction so the handoff threshold is the
-   * only thing that fires. Leaving it on keeps compaction as a safety net.
+   * only thing that fires. Defaults to true: compaction triggers mid-turn while
+   * the threshold is checked between turns, so leaving it on means it wins the
+   * race and no handoff is ever written. Set false only if you want compaction
+   * as a safety net and accept that it may preempt the handoff.
    */
   disableAutoCompact: boolean
 

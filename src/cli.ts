@@ -30,7 +30,8 @@ Options:
   --port <n>             Dashboard port                            (default: 4319)
   --host <addr>          Dashboard bind address              (default: 127.0.0.1)
   --bypass-permissions   Approve every tool call instead of using the tool policy
-  --no-auto-compact      Turn off Claude Code's own compaction
+  --auto-compact         Re-enable Claude Code's own compaction (off by default;
+                         it fires mid-turn and would preempt the handoff)
   --quiet                Do not mirror the event log to stdout
   -h, --help             This message
 
@@ -73,6 +74,7 @@ function overridesFrom(flags: Flags): Record<string, unknown> {
   if (typeof flags['max-legs'] === 'string') o.maxLegs = Number(flags['max-legs'])
   if (typeof flags['max-cost'] === 'string') o.maxCostUsdTotal = Number(flags['max-cost'])
   if (flags['bypass-permissions'] === true) o.permissionMode = 'bypassPermissions'
+  if (flags['auto-compact'] === true) o.disableAutoCompact = false
   if (flags['no-auto-compact'] === true) o.disableAutoCompact = true
 
   if (flags.server === true) server.enabled = true
@@ -241,7 +243,7 @@ function initProject(cwd: string): void {
           legCooldownSec: 5,
           model: null,
           permissionMode: 'default',
-          disableAutoCompact: false,
+          disableAutoCompact: true,
           stopOnBlocked: false,
           server: { enabled: true, host: '127.0.0.1', port: 4319, token: null },
           notifications: {
