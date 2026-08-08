@@ -3,9 +3,13 @@ import assert from 'node:assert/strict'
 import {
   effectiveHandoffThreshold,
   pickMaxOutputTokens,
+  ASSUMED_TURN_GROWTH,
   HANDOFF_MARGIN,
   MIN_THRESHOLD,
 } from '../src/threshold.ts'
+
+/** Treated as a run that has measured a negligible per-turn jump. */
+const TINY_GROWTH = 0.01
 
 // The session that exposed this: a 200k window with a 32k output reserve and
 // Claude Code compacting at 167k. A configured 80% never fired, because both
@@ -29,6 +33,7 @@ describe('effective handoff threshold', () => {
       configured: 0.8,
       ...SONNET,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     assert.equal(r.clamped, false)
     assert.equal(r.threshold, 0.8)
@@ -40,6 +45,7 @@ describe('effective handoff threshold', () => {
       configured: 0.9,
       ...HAIKU,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     // 1 - 32000/200000 = 0.84, minus the margin.
     assert.equal(r.clamped, true)
@@ -54,6 +60,7 @@ describe('effective handoff threshold', () => {
       maxOutputTokens: null,
       autoCompactThreshold: 120_000,
       autoCompactEnabled: true,
+      turnGrowth: TINY_GROWTH,
     })
     // 120000/200000 = 0.6, minus the margin.
     assert.equal(r.clamped, true)
@@ -68,6 +75,7 @@ describe('effective handoff threshold', () => {
       maxOutputTokens: 32_000, // ceiling 0.84
       autoCompactThreshold: 120_000, // ceiling 0.60 — lower, so it wins
       autoCompactEnabled: true,
+      turnGrowth: TINY_GROWTH,
     })
     assert.ok(Math.abs(r.threshold - (0.6 - HANDOFF_MARGIN)) < 1e-9)
     assert.match(r.reason ?? '', /auto-compacts/)
@@ -78,11 +86,13 @@ describe('effective handoff threshold', () => {
       configured: 0.8,
       ...HAIKU,
       autoCompactEnabled: true,
+      turnGrowth: TINY_GROWTH,
     })
     const withoutIt = effectiveHandoffThreshold({
       configured: 0.8,
       ...HAIKU,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     // 167000/200000 = 0.835; minus the margin that is 0.805, so 0.8 survives
     // either way — but the reported ceiling differs.
@@ -97,6 +107,7 @@ describe('effective handoff threshold', () => {
       configured: ceiling,
       ...HAIKU,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     assert.equal(r.clamped, false)
     assert.equal(r.threshold, ceiling)
@@ -109,6 +120,7 @@ describe('effective handoff threshold', () => {
       maxOutputTokens: 95_000, // would leave 0.05
       autoCompactThreshold: null,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     assert.equal(r.threshold, MIN_THRESHOLD)
   })
@@ -120,6 +132,7 @@ describe('effective handoff threshold', () => {
       maxOutputTokens: null,
       autoCompactThreshold: null,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     assert.equal(r.clamped, false)
     assert.equal(r.threshold, 0.8)
@@ -132,6 +145,7 @@ describe('effective handoff threshold', () => {
       maxOutputTokens: 32_000,
       autoCompactThreshold: 167_000,
       autoCompactEnabled: true,
+      turnGrowth: TINY_GROWTH,
     })
     assert.equal(r.clamped, false)
     assert.equal(r.threshold, 0.8)
@@ -142,9 +156,79 @@ describe('effective handoff threshold', () => {
       configured: 0.95,
       ...HAIKU,
       autoCompactEnabled: false,
+      turnGrowth: TINY_GROWTH,
     })
     assert.match(r.reason ?? '', /handoffThreshold 95% is not reachable/)
     assert.match(r.reason ?? '', /Using 81% instead/)
+  })
+})
+
+describe('headroom for a turn', () => {
+  // The run that exposed this: turns landed at 64% then 79% — a fifteen point
+  // jump — and the turn after that ran out of context. A threshold of 80% under
+  // an 84% ceiling was never going to be hit, only jumped over.
+  test('keeps a full turn of growth below the ceiling', () => {
+    const r = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: 0.15,
+    })
+    assert.equal(r.clamped, true)
+    assert.ok(Math.abs(r.threshold - (0.84 - 0.15)) < 1e-9)
+    assert.ok(r.threshold + 0.15 <= r.ceiling + 1e-9, 'one more turn must still fit')
+  })
+
+  test('assumes a turn of growth before the run has measured one', () => {
+    const r = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: null,
+    })
+    assert.equal(r.headroom, ASSUMED_TURN_GROWTH)
+    assert.ok(Math.abs(r.threshold - (0.84 - ASSUMED_TURN_GROWTH)) < 1e-9)
+    assert.match(r.reason ?? '', /is assumed to add/)
+  })
+
+  test('a measured jump larger than the assumption lowers the threshold further', () => {
+    const assumed = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: null,
+    })
+    const measured = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: 0.3,
+    })
+    assert.ok(measured.threshold < assumed.threshold)
+    assert.match(measured.reason ?? '', /has been seen to add/)
+  })
+
+  test('a measured jump smaller than the margin does not widen the threshold', () => {
+    const r = effectiveHandoffThreshold({
+      configured: 0.95,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: 0.001,
+    })
+    assert.equal(r.headroom, HANDOFF_MARGIN)
+  })
+
+  test('a roomy window still takes the configured threshold', () => {
+    // On a million-token window a fifteen point turn is not possible in one go,
+    // and the ceiling sits at 93%, so nothing binds.
+    const r = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...SONNET,
+      autoCompactEnabled: false,
+      turnGrowth: 0.05,
+    })
+    assert.equal(r.clamped, false)
+    assert.equal(r.threshold, 0.8)
   })
 })
 
