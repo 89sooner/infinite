@@ -45,6 +45,12 @@ export type ThresholdResult = {
   headroom: number
   /** True when the configured value had to be lowered. */
   clamped: boolean
+  /**
+   * True when the clamp rests only on the assumed turn size, so a measurement
+   * may lift it again. Such a clamp is worth applying but not worth alarming
+   * about — on a roomy window the assumption is usually pessimistic.
+   */
+  provisional: boolean
   reason: string | null
 }
 
@@ -83,7 +89,14 @@ export function effectiveHandoffThreshold(input: ThresholdInput): ThresholdResul
   const headroom = Math.max(HANDOFF_MARGIN, turnGrowth ?? ASSUMED_TURN_GROWTH)
 
   if (!(maxTokens > 0)) {
-    return { threshold: configured, ceiling: 1, headroom, clamped: false, reason: null }
+    return {
+      threshold: configured,
+      ceiling: 1,
+      headroom,
+      clamped: false,
+      provisional: false,
+      reason: null,
+    }
   }
 
   const limits: { at: number; because: string }[] = []
@@ -107,7 +120,14 @@ export function effectiveHandoffThreshold(input: ThresholdInput): ThresholdResul
   }
 
   if (limits.length === 0) {
-    return { threshold: configured, ceiling: 1, headroom, clamped: false, reason: null }
+    return {
+      threshold: configured,
+      ceiling: 1,
+      headroom,
+      clamped: false,
+      provisional: false,
+      reason: null,
+    }
   }
 
   const binding = limits.reduce((lowest, l) => (l.at < lowest.at ? l : lowest))
@@ -115,22 +135,26 @@ export function effectiveHandoffThreshold(input: ThresholdInput): ThresholdResul
   const safe = Math.max(MIN_THRESHOLD, ceiling - headroom)
 
   if (configured <= safe) {
-    return { threshold: configured, ceiling, headroom, clamped: false, reason: null }
+    return { threshold: configured, ceiling, headroom, clamped: false, provisional: false, reason: null }
   }
 
   const measured = turnGrowth !== null
-  return {
-    threshold: safe,
-    ceiling,
-    headroom,
-    clamped: true,
-    reason:
-      `handoffThreshold ${pct(configured)} is not reachable: ${binding.because}, ` +
+  // Would this have been clamped even without the guess about turn size? If not,
+  // the guess is doing the work and a measurement may well undo it.
+  const provisional = !measured && configured <= ceiling - HANDOFF_MARGIN
+
+  const reason = provisional
+    ? `handoffThreshold ${pct(configured)} may not be reachable: ${binding.because}, ` +
+      `leaving a ${pct(ceiling)} ceiling. Until a turn has been measured, one is assumed ` +
+      `to add ${pct(headroom)} of the window, so the threshold starts at ${pct(safe)} and ` +
+      `rises again if turns turn out smaller.`
+    : `handoffThreshold ${pct(configured)} is not reachable: ${binding.because}, ` +
       `leaving a ${pct(ceiling)} ceiling, and a single turn ` +
       `${measured ? 'has been seen to add' : 'is assumed to add'} ${pct(headroom)} of the ` +
       `window — a threshold nearer the ceiling would be jumped over rather than hit. ` +
-      `Using ${pct(safe)} instead.`,
-  }
+      `Using ${pct(safe)} instead.`
+
+  return { threshold: safe, ceiling, headroom, clamped: true, provisional, reason }
 }
 
 function pct(fraction: number): string {

@@ -129,13 +129,13 @@ node /path/to/infinite/src/cli.ts run --cwd ~/work/my-project --server
 ### 결과
 
 ```
-session 1   3 turns   handoff (turns)   context 13% (126,562 / 967,000)   $2.60
-session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
-                                                              합계 4턴, $4.29
+session 1   3 turns   handoff (turns)   context 12% ( 98,979 / 1,000,000)   $2.20
+session 2   1 turn    complete          context 10%                         $1.53
+                                                                합계 4턴, $3.73
 ```
 
-세션 1이 두 개를 구현하고 핸드오프를 남긴 뒤 종료, 세션 2가 **그 문서만 읽고** 나머지
-하나를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 88 → 119개로
+세션 1이 `stats`와 `export`를 구현하고 핸드오프를 남긴 뒤 종료, 세션 2가 **그 문서만 읽고**
+`doctor`를 완성했습니다. 산출물은 새 모듈 3개와 테스트 3개, 테스트 수는 133 → 170개로
 전부 통과, `tsc --noEmit` 클린이었습니다.
 
 > **주의**: 이 실행은 컨텍스트가 아니라 `maxTurnsPerLeg: 2`로 핸드오프를 유도했습니다
@@ -144,27 +144,28 @@ session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
 
 ### 실행 A의 핸드오프
 
-16,816자, 여섯 섹션의 분량 배분:
+14,767자, 여섯 섹션의 분량 배분:
 
 | 섹션 | 분량 |
 |---|---|
-| STATE | 1,246자 |
-| NEXT STEPS | 6,345자 |
-| FACTS AND DECISIONS | 4,860자 |
-| DEAD ENDS | 2,160자 |
-| OPEN QUESTIONS | 620자 |
-| FILES | 1,446자 |
+| STATE | 1,263자 |
+| NEXT STEPS | 6,076자 |
+| FACTS AND DECISIONS | 4,035자 |
+| DEAD ENDS | 149자 |
+| OPEN QUESTIONS | 1,059자 |
+| FILES | 2,094자 |
 
 아래 인용은 실제 문서에서 가져왔으며, 길이 때문에 일부는 축약했습니다.
 
 **STATE** — VERIFIED와 ASSUMED가 실제로 구분됩니다:
 
 ```markdown
-- VERIFIED: `infinite doctor` (the third and final command) has NOT been started. No
-  `src/doctor.ts` exists, no `doctor` branch in `src/cli.ts`, no `test/doctor.test.ts`.
-- VERIFIED: `npm test` passes 104/104, 0 failures (ran it after both completed commands).
-- ASSUMED (not re-verified this leg, but true as of last check): the repo has no `.git`
-  — `git status`/commits are not part of this workflow, do not attempt them.
+- VERIFIED: `infinite stats` is fully implemented — `src/stats.ts` (pure `computeStats`/
+  `formatStats`), wired into `src/cli.ts` (USAGE line + `if (command === 'stats')` block),
+  tests in `test/stats.test.ts` plus two cases appended to `test/cli.test.ts`.
+- VERIFIED: `npm run typecheck` is clean and `npm test` passes 151/151 as of the end of
+  this session (ran both after implementing `export`).
+- VERIFIED: `infinite doctor` (the third and final command) has NOT been started.
 ```
 
 **NEXT STEPS** — 파일과 줄 번호를 짚고, 설계 선택지를 근거와 함께 남깁니다:
@@ -179,45 +180,52 @@ session 2   1 turn    complete          context 10% ( 95,872 / 967,000)   $1.68
   existing error messages already ARE the specific remedies. Do not duplicate that logic.
 ```
 
-**DEAD ENDS** — 다음 세션이 같은 실패를 반복하지 않게 하는 부분입니다:
+**DEAD ENDS** — 이번 실행에서는 비었습니다. 그게 결과입니다:
 
 ```markdown
-- Tried using `sed -n`, `awk`, and inline `python3 -c` via Bash — all blocked by this
-  environment's tool policy. Workaround that DOES work: `grep -oP ... | wc -c`, or just
-  Read the file. Expect this same restriction to apply to doctor work — don't waste turns
-  retrying sed/awk/python one-liners.
-- Tried chaining `cd <dir> && node ... && cat ...` in one Bash call — blocked outright.
-  One command per Bash call, absolute paths, no `&&` chaining, no `cd`.
+- None encountered this session. Both `stats` and `export` went in cleanly on the first
+  attempt; no failed approaches worth recording.
 ```
 
 **FILES** — 무엇이 끝났고 무엇이 남았는지 파일 단위로:
 
 ```markdown
-- `src/stats.ts` — new. Pure `computeStats`/`formatStats`. Complete, tested, do not revisit.
-- `src/cli.ts` — modified. Added imports, two USAGE lines, two `if (command === ...)` blocks,
-  and a `readMissionText()` helper. No existing command logic changed. NEXT: needs a third
-  USAGE line + `if (command === 'doctor')` block.
-- `README.md` — NOT modified yet (CLI docs at ~line 156-176 are now stale). Deferred.
+- `src/stats.ts` — new, complete. Pure `computeStats`/`formatStats`. Do not revisit
+  unless a bug is found.
+- `src/cli.ts` — modified. Added imports, two new `USAGE` lines (stats, export), two new
+  `if (command === ...)` blocks, and a `readMissionForExport()` helper. No existing
+  command logic (`run`, `status`, `init`, `handoff`, `notify-test`, `notify`) was touched.
+  NEXT: needs a third `USAGE` line for `doctor` and an `if (command === 'doctor')` block.
 ```
 
-### 효과 측정
+### DEAD ENDS가 도구의 결함을 신고했다
 
-`DEAD ENDS`가 실제로 작동했는지 이벤트 로그로 확인했습니다.
+이 미션은 두 번 돌렸습니다. **처음 실행에서는 `DEAD ENDS`가 2,160자였고**, 내용은 전부
+도구 정책과의 싸움이었습니다.
+
+```markdown
+- Tried using `sed -n`, `awk`, and inline `python3 -c` via Bash — all blocked by this
+  environment's tool policy. Expect this same restriction to apply to doctor work —
+  don't waste turns retrying sed/awk/python one-liners.
+- Tried chaining `cd <dir> && node ... && cat ...` in one Bash call — blocked outright.
+```
+
+이건 **정상 동작이 아니라 버그였습니다.** 파고들어 보니 `denyBash`의 `"rm -rf /"`가 단순
+부분 문자열 매칭이라 `rm -rf /tmp/scratch/build`까지 막고 있었고, 따옴표 안의 `;`로 명령을
+분해하는 바람에 `python3 -c "..."`가 통째로 거부됐으며, `mkfs.ext4`는 오히려 그냥 통과하고
+있었습니다. 전부 수정했습니다 ([보안](#보안) 참조).
+
+정책을 고친 뒤 **같은 미션을 다시 돌린 것이 위의 기록**입니다. 이벤트 로그로 대조하면:
 
 | | 도구 호출 | 정책에 거부됨 |
 |---|---|---|
-| 세션 1 (맨땅에서 시작) | 32회 | **5회** |
-| 세션 2 (핸드오프 읽고 시작) | 19회 | **1회** |
+| 수정 전 · 세션 1 | 32회 | 5회 |
+| 수정 전 · 세션 2 (핸드오프 읽음) | 19회 | 1회 |
+| **수정 후 · 세션 1** | 23회 | **0회** |
+| **수정 후 · 세션 2** | 25회 | **0회** |
 
-세션 2는 같은 벽에 다시 부딪히지 않았습니다.
-
-### 부수 효과: 핸드오프가 도구의 결함을 신고했다
-
-위 `DEAD ENDS`에 적힌 제약들은 사실 **정상 동작이 아니라 버그였습니다.** 파고들어 보니
-`denyBash`의 `"rm -rf /"`가 단순 부분 문자열 매칭이라 `rm -rf /tmp/scratch/build`까지
-막고 있었고, 따옴표 안의 `;`로 명령을 분해하는 바람에 `python3 -c "..."`가 통째로
-거부됐으며, `mkfs.ext4`는 오히려 그냥 통과하고 있었습니다. 전부 수정했습니다
-([보안](#보안) 참조).
+거부가 사라지자 `DEAD ENDS`도 2,160자에서 149자("없음")로 줄었습니다. 섹션이 비는 것이
+좋은 신호입니다 — 기록할 실패가 없었다는 뜻이니까요.
 
 에이전트가 무엇과 싸웠는지가 문서에 남으므로, `DEAD ENDS`는 다음 세션을 위한 메모인
 동시에 **운영자가 정책과 미션 문구에서 고칠 곳을 찾는 단서**이기도 합니다. 주기적으로
@@ -297,18 +305,22 @@ session 2   turn 1   68%
 프롬프트로 요구한 적 없는 항목입니다. 에이전트가 자기 예산을 인식하고 다음 세션에 넘긴
 것이고, 다음 세션이 그 질문에 답했습니다.
 
-### 이 실행이 찾아낸 결함
+### 이 실행들이 찾아낸 결함
 
-여기까지 오는 데 네 번의 실패가 있었고, 전부 도구의 결함이었습니다.
+여기까지 오는 데 여러 번의 실패가 있었고, 전부 도구의 결함이었습니다.
 
 | 증상 | 원인 | 수정 |
 |---|---|---|
 | 16턴 동안 80%에 못 닿음, compact가 5번 리셋 | `disableAutoCompact` 기본값이 `false` | 기본값을 `true`로 |
 | 79%까지 갔다가 컨텍스트 초과로 세션 실패 | 여유분 3%p가 턴 증가폭(15%p)보다 작음 | 천장에서 턴 하나만큼 아래로 |
 | `turn failed: success` 라는 로그 | `is_error`가 참인데 `subtype`만 출력 | 진단 필드 전부 출력 |
+| 1M 창에서 "80%는 도달 불가능" 경고 후 조용히 80%로 복귀 | 측정 전 가정값(15%p)만으로 경고 | 가정에 기반한 클램프는 debug로 강등 |
 
-짧은 데모로는 하나도 잡히지 않았습니다. 66%를 넘겨본 적이 없었기 때문입니다.
-**장기 실행만이 드러낼 수 있는 문제들이었습니다.**
+앞의 셋은 짧은 데모로는 하나도 잡히지 않았습니다. 66%를 넘겨본 적이 없었기 때문입니다.
+마지막 하나는 세 번째 수정이 만든 것이고, **실행 A를 새 코드로 다시 돌려서** 잡혔습니다 —
+넉넉한 창에서는 그 가정이 과하게 비관적이라 오보가 됩니다.
+
+**장기 실행과 재실행만이 드러낼 수 있는 문제들이었습니다.**
 
 ---
 

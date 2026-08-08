@@ -218,6 +218,58 @@ describe('headroom for a turn', () => {
     assert.equal(r.headroom, HANDOFF_MARGIN)
   })
 
+  test('a clamp resting only on the assumption is marked provisional', () => {
+    // The run that exposed this: on a million-token window the assumed fifteen
+    // point turn briefly pushed 80% below the line and logged that it was "not
+    // reachable" — then the first measurement put it straight back to 80%. The
+    // clamp is still worth applying; the alarm was not.
+    const provisional = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...SONNET,
+      autoCompactEnabled: false,
+      turnGrowth: null,
+    })
+    assert.equal(provisional.clamped, true)
+    assert.equal(provisional.provisional, true)
+    assert.match(provisional.reason ?? '', /may not be reachable/)
+    assert.match(provisional.reason ?? '', /rises again if turns turn out smaller/)
+
+    // Once measured, the same configuration is fine again.
+    const measured = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...SONNET,
+      autoCompactEnabled: false,
+      turnGrowth: 0.01,
+    })
+    assert.equal(measured.clamped, false)
+    assert.equal(measured.threshold, 0.8)
+  })
+
+  test('a clamp that would happen anyway is not provisional', () => {
+    // 95% is above the ceiling even with only the minimum margin, so no
+    // measurement can rescue it.
+    const r = effectiveHandoffThreshold({
+      configured: 0.95,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: null,
+    })
+    assert.equal(r.clamped, true)
+    assert.equal(r.provisional, false)
+    assert.match(r.reason ?? '', /is not reachable/)
+  })
+
+  test('a measured clamp is never provisional', () => {
+    const r = effectiveHandoffThreshold({
+      configured: 0.8,
+      ...HAIKU,
+      autoCompactEnabled: false,
+      turnGrowth: 0.15,
+    })
+    assert.equal(r.clamped, true)
+    assert.equal(r.provisional, false)
+  })
+
   test('a roomy window still takes the configured threshold', () => {
     // On a million-token window a fifteen point turn is not possible in one go,
     // and the ceiling sits at 93%, so nothing binds.

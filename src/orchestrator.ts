@@ -592,10 +592,17 @@ export class Orchestrator {
     })
     this.threshold = resolved.threshold
 
-    // Re-report if a bigger turn has since lowered the threshold further.
+    // Re-report if a bigger turn has since lowered the threshold further. A
+    // provisional clamp is only noted, not warned about: on a roomy window the
+    // assumed turn size is usually pessimistic and the first measurement lifts
+    // the threshold back to what was configured.
     if (resolved.clamped && this.threshold !== this.thresholdReported) {
       this.thresholdReported = this.threshold
-      this.store.warn('context', resolved.reason ?? 'handoff threshold clamped')
+      this.store.log(
+        resolved.provisional ? 'debug' : 'warn',
+        'context',
+        resolved.reason ?? 'handoff threshold clamped',
+      )
     }
 
     const snapshot: ContextSnapshot = {
