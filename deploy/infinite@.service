@@ -1,0 +1,75 @@
+# Templated unit: one instance per project.
+#
+#   systemctl enable --now infinite@my-project
+#
+# The instance name is the directory under @PROJECTS@ that the agent works in,
+# so several missions can run side by side without duplicating this file.
+#
+# @NODE@, @PREFIX@, @PROJECTS@, @USER@ and @GROUP@ are substituted by
+# deploy/install.sh. Do not install this file as-is.
+
+[Unit]
+Description=infinite — relayed Claude Code agent (%i)
+Documentation=https://github.com/89sooner/infinite
+After=network-online.target
+Wants=network-online.target
+
+# A structurally broken mission must not restart forever. These are Unit-level
+# directives — systemd ignores them under [Service].
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@PROJECTS@/%i
+
+# Shared defaults first, then per-project values which may override them.
+# Secrets live here rather than in infinite.config.json, which is committed.
+EnvironmentFile=-/etc/infinite/default.env
+EnvironmentFile=-/etc/infinite/%i.env
+
+ExecStart=@NODE@ @PREFIX@/src/cli.ts run --cwd @PROJECTS@/%i --server --host 127.0.0.1
+
+# A stop request is honoured after the turn in flight finishes, and a turn can
+# run for minutes. Killing sooner loses that turn's work, since the handoff is
+# only written when the agent is asked for one.
+KillSignal=SIGTERM
+TimeoutStopSec=900
+
+# A finished mission exits 0 and must stay stopped; a crash exits non-zero and
+# is worth retrying. The rate limit lives in [Unit] above.
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=infinite@%i
+
+# Hardening. The agent edits files and runs build tooling, so it needs real
+# write access to its project — everything else is closed off.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+# ProtectHome is deliberately off: Claude Code keeps its credentials and session
+# transcripts in the service user's home, and npm keeps its cache there.
+ProtectHome=false
+ReadWritePaths=@PROJECTS@/%i @HOME@
+
+[Install]
+WantedBy=multi-user.target
